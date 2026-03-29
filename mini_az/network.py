@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple
+from typing import Dict
 
 from .encoding import INPUT_PLANES, board_to_tensor, legal_moves_canonical
 from .config import Policy, PV

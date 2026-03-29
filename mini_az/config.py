@@ -5,7 +5,7 @@ import random
 import sys
 import time as _time
 import builtins as _builtins
-from typing import Dict, List, Tuple, Optional, Hashable
+from typing import Dict, Tuple
 
 import chess
 import numpy as np

@@ -139,6 +139,10 @@ class ReplayBuffer:
 
 def flip_sample_lr(s: Sample) -> Sample:
     bp = s.board_planes[:, :, ::-1].copy()
+    # Swap kingside ↔ queenside castling planes (mirroring flips the board files)
+    from .encoding import PL_MY_OO, PL_MY_OOO, PL_OPP_OO, PL_OPP_OOO
+    bp[PL_MY_OO], bp[PL_MY_OOO] = bp[PL_MY_OOO].copy(), bp[PL_MY_OO].copy()
+    bp[PL_OPP_OO], bp[PL_OPP_OOO] = bp[PL_OPP_OOO].copy(), bp[PL_OPP_OO].copy()
     fs = (s.moves_fs ^ 7).copy()
     ts = (s.moves_ts ^ 7).copy()
     return Sample(bp, fs, ts, s.moves_pr.copy(), s.target_pi.copy(), s.z, s.wdl.copy())
@@ -181,7 +185,7 @@ def masked_entropy(p: torch.Tensor, mask: torch.Tensor, eps: float = 1e-12) -> t
     return ent.mean()
 
 
-def train_step(net, opt, batch, l2=1e-4, val_w=2.0):
+def train_step(net, opt, batch, val_w=2.0):
     boards, fs, ts, pr, mask, target_pi, z, wdl_target = batch
     logits, wdl_logits = net.forward_policy_value(boards, fs, ts, pr, mask)
 

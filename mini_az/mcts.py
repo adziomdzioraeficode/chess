@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple, Hashable
 import numpy as np
 import chess
 
-from .config import Policy, PV, NO_PROGRESS_HALFMOVE, material_score
+from .config import PV, NO_PROGRESS_HALFMOVE, material_score
 from .encoding import HISTORY_STEPS
 from .network import ChessNet
 

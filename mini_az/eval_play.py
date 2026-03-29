@@ -17,14 +17,6 @@ def sims_for_ply(base: int, plies: int) -> int:
     return base
 
 
-def sims_for_ply_simplified(base: int, plies: int) -> int:
-    if plies < 10:
-        return max(8, base // 6)
-    if plies < 50:
-        return max(12, base // 3)
-    return max(10, base // 4)
-
-
 def play_vs_stockfish(
     net: ChessNet,
     device: str,

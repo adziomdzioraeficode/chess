@@ -161,7 +161,7 @@ def board_to_tensor(board: chess.Board,
         f = chess.square_file(epsq)
         planes[PL_EP, r, f] = 1.0
 
-    # Halfmove clock scaled to [0,1] (50-move rule = 100 halfmove_clock)
+    # Halfmove clock scaled to [0,1] — saturates at 50 (early warning before 50-move draw at 100)
     planes[PL_HALFMOVE, :, :] = min(board.halfmove_clock / 50.0, 1.0)
     # Fullmove counter scaled to [0,1] (game phase awareness)
     planes[PL_FULLMOVE, :, :] = min(board.fullmove_number / 200.0, 1.0)
