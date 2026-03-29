@@ -58,6 +58,7 @@ def play_vs_stockfish(
                 if board.turn == our_color:
                     visits, v_now = mcts_search(
                         net, board, device, sims=sims,
+                        policy_temp=1.0,
                         dirichlet_alpha=0.0,
                         dirichlet_eps=0.0,
                         history=board_history[:HISTORY_STEPS])
@@ -147,6 +148,7 @@ def play_vs_random(
             if board.turn == our_color:
                 visits, v_now = mcts_search(
                     net, board, device, sims=sims,
+                    policy_temp=1.0,
                     dirichlet_alpha=0.0,
                     dirichlet_eps=0.0,
                     history=board_history[:HISTORY_STEPS]
@@ -214,6 +216,7 @@ def play_vs_model(
             net_to_move = net_a if (board.turn == a_color) else net_b
             visits, _ = mcts_search(
                 net_to_move, board, device, sims=sims,
+                policy_temp=1.0,
                 dirichlet_alpha=0.0, dirichlet_eps=0.0,
                 history=board_history[:HISTORY_STEPS]
             )
@@ -293,6 +296,7 @@ def uci_loop(net: ChessNet, device: str, sims: int):
                 continue
             visits, v_now = mcts_search(
                 net, board, device, sims=sims,
+                policy_temp=1.0,
                 dirichlet_alpha=0.0,
                 dirichlet_eps=0.0,
                 history=board_history[:HISTORY_STEPS])

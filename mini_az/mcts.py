@@ -35,7 +35,7 @@ def mcts_search(
     c_puct: float = 2.5,
     fpu_reduction: float = 0.25,
     fpu_root: float = -1.0,
-    policy_temp: float = 1.4,
+    policy_temp: float = 1.0,
     dirichlet_alpha: float = 0.0,
     dirichlet_eps: float = 0.0,
     history: list = None,
