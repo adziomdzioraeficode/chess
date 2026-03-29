@@ -27,7 +27,7 @@
 #   - Network 2× bigger (5.5M vs 3.3M) → inference ~1.7× slower per search
 #   - 80 workers optimal on Ds96v6 (bench: 60 searches/s at 32 sims)
 #   - Training uses 32 threads during pause (bench: ~5 steps/s@batch512)
-#   - SF teacher depth-8 multipv-5: ~50ms/call, 90% prob → ~90% effective blend (all workers)
+#   - SF teacher depth-8 multipv-5: ~50ms/call, 90% prob × 70% mix → ~63% effective blend (all workers)
 #   - mp_sims=32: 2× more games/iter vs 64 sims — faster iteration, key early on
 #   - steps_per_iter=200: more gradient steps to utilise the extra games
 #   - Expected iter time: ~80s selfplay + ~40s train = ~120s/iter
