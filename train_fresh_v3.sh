@@ -19,11 +19,13 @@
 #
 # Tuning rationale (v3 vs v2):
 #   - Network 2× bigger (5.5M vs 3.3M) → inference ~1.7× slower per search
-#   - 80 workers optimal on D96s v6 (bench: 60 searches/s at 64 sims)
-#   - Training uses 32 threads during pause (bench: 5.0 steps/s@batch512)
-#   - SF teacher depth-14 multipv-5: ~148ms/call, 80% prob → ~40% effective blend
-#   - Expected iter time: ~140s selfplay + ~20s train = ~160s/iter
-#   - 8h ≈ ~180 iters
+#   - 80 workers optimal on D96s v6 (bench: 60 searches/s at 32 sims)
+#   - Training uses 32 threads during pause (bench: ~5 steps/s@batch512)
+#   - SF teacher depth-8 multipv-5: ~50ms/call, 80% prob → ~40% effective blend
+#   - mp_sims=32: 2× more games/iter vs 64 sims — faster iteration, key early on
+#   - steps_per_iter=200: more gradient steps to utilise the extra games
+#   - Expected iter time: ~80s selfplay + ~40s train = ~120s/iter
+#   - 8h ≈ ~240 iters
 #
 # Strategy:
 #   - Phase 1 (iter 1-30):  Heavy SF distillation, random init → basic piece values
@@ -47,10 +49,10 @@ mkdir -p models
 
 exec python -m mini_az --mode train \
     --workers 80 \
-    --mp_sims 64 \
+    --mp_sims 32 \
     --games_per_iter 120 \
     --iters 9999 \
-    --steps_per_iter 100 \
+    --steps_per_iter 200 \
     --batch 512 \
     --lr 1e-3 \
     --buffer 500000 \
@@ -71,7 +73,7 @@ exec python -m mini_az --mode train \
     --sf_teacher_prob 0.80 \
     --sf_teacher_mix 0.50 \
     --sf_teacher_time_ms 0 \
-    --sf_teacher_depth 14 \
+    --sf_teacher_depth 8 \
     --sf_teacher_multipv 5 \
     --sf_teacher_cp_cap 600 \
     --sf_teacher_cp_soft_scale 150.0 \

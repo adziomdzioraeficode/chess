@@ -480,8 +480,8 @@ def _run_train(args, net, device, best_path):
             old_train_nt = torch.get_num_threads()
             if args.workers > 0:
                 pause_ev.set()
-                time.sleep(0.5)  # let workers finish current inference
-                torch.set_num_threads(min(48, max(8, args.workers)))
+                time.sleep(3)  # workers pause between games; wait for stragglers
+                torch.set_num_threads(min(32, max(8, args.workers)))
             t_tr0 = time.time()
             net.train()
             last_m = None
@@ -736,7 +736,7 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pau
 
     old_nt = torch.get_num_threads()
     try:
-        torch.set_num_threads(min(48, max(8, args.workers)))
+        torch.set_num_threads(min(32, max(8, args.workers)))
         net.eval()
         print(f"Starting {args.eval_games} SF plays (elo={args.sf_eval_elo})")
         sf_score, sf_winrate, sf_elo_diff = play_vs_stockfish(
