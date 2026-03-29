@@ -185,11 +185,12 @@ def make_game_samples_unified(
         # T=1.0 at ply 0 → decays smoothly → T≈0.1 by ply 40+
         TEMP_PLY_FULL = 16   # full exploration temperature until this ply
         TEMP_FLOOR = 0.1     # minimum temperature
+        # decay_rate=0.08 gives T≈0.73@ply20, 0.33@ply30, 0.15@ply40 (matches lc0 curve shape)
+        TEMP_DECAY_RATE = 0.08
         if tply < TEMP_PLY_FULL:
             temperature = 1.0
         else:
-            decay_rate = 0.08  # controls how fast temperature drops
-            temperature = max(TEMP_FLOOR, math.exp(-decay_rate * (tply - TEMP_PLY_FULL)))
+            temperature = max(TEMP_FLOOR, math.exp(-TEMP_DECAY_RATE * (tply - TEMP_PLY_FULL)))
 
         legals = legal_moves_canonical(board)
         legal_real = [m[3] for m in legals]

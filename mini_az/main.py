@@ -334,7 +334,8 @@ def _run_train(args, net, device, best_path):
         pg.pop('initial_lr', None)
     remaining_iters = max(1, args.iters - start_iter)
     total_steps = remaining_iters * args.steps_per_iter
-    warmup_steps = max(1, int(total_steps * 0.02))  # 2% linear warmup (lc0-style)
+    WARMUP_FRAC = 0.02  # 2% linear warmup (lc0-style: stabilises early training with random weights)
+    warmup_steps = max(1, int(total_steps * WARMUP_FRAC))
     cosine_steps = total_steps - warmup_steps
     warmup_sched = torch.optim.lr_scheduler.LinearLR(
         opt, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
