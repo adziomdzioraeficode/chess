@@ -54,6 +54,8 @@ def main():
     ap.add_argument("--mix_opp", type=float, default=0.20)
     ap.add_argument("--opp_reload_sec", type=float, default=60)
     ap.add_argument("--no_sf", action="store_true", help="Disable Stockfish bootstrap in workers")
+    ap.add_argument("--sf_worker_frac", type=float, default=0.50,
+                    help="Fraction of self-play workers with local Stockfish enabled")
 
     ap.add_argument("--opp_lag", type=int, default=10)
 
@@ -135,51 +137,37 @@ def main():
 
     net = ChessNet().to(device)
 
-    best_path = args.best_model
-    os.makedirs(os.path.dirname(best_path) or ".", exist_ok=True)
-    if not os.path.exists(best_path):
-        if os.path.exists(args.model):
-            shutil.copy2(args.model, best_path)
-        else:
-            torch.save(net.state_dict(), best_path)
-        print(f"Initialized best model: {best_path}")
-
-    opponent_path = args.opponent_model
-    if not os.path.exists(opponent_path):
-        src = None
-        if os.path.exists(args.best_model):
-            src = args.best_model
-        elif os.path.exists(args.model):
-            src = args.model
-
-        tmp = opponent_path + f".tmp.{os.getpid()}"
-        if src is not None:
-            shutil.copy2(src, tmp)
-        else:
-            torch.save(net.state_dict(), tmp)
-
-        os.replace(tmp, opponent_path)
-        print(f"Initialized opponent model: {opponent_path}")
-    else:
-        try:
-            _tmp = ChessNet()
-            _tmp.load_state_dict(torch.load(opponent_path, map_location="cpu", weights_only=True))
-        except Exception as e:
-            print(f"Opponent model incompatible ({e}). Reinitializing: {opponent_path}")
-            tmp = opponent_path + f".tmp.{os.getpid()}"
-            src = args.best_model if os.path.exists(args.best_model) else (args.model if os.path.exists(args.model) else None)
-            if src is not None:
-                shutil.copy2(src, tmp)
-            else:
-                torch.save(net.state_dict(), tmp)
-            os.replace(tmp, opponent_path)
-
     if os.path.exists(args.model):
         try:
             net.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
             print(f"Loaded model weights: {args.model}")
         except Exception as e:
             print(f"Could not load model weights ({e}). Starting fresh.")
+
+    def _ensure_snapshot(path: str, label: str):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        recreate = False
+        if os.path.exists(path):
+            try:
+                probe = ChessNet()
+                probe.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
+            except Exception as e:
+                print(f"{label} incompatible ({e}). Reinitializing: {path}")
+                recreate = True
+        else:
+            recreate = True
+
+        if recreate:
+            tmp = path + f".tmp.{os.getpid()}"
+            torch.save({k: v.detach().cpu() for k, v in net.state_dict().items()}, tmp)
+            os.replace(tmp, path)
+            print(f"Initialized {label.lower()}: {path}")
+
+    best_path = args.best_model
+    _ensure_snapshot(best_path, "Best model")
+
+    opponent_path = args.opponent_model
+    _ensure_snapshot(opponent_path, "Opponent model")
 
     if args.mode == "train":
         _run_train(args, net, device, best_path)
@@ -361,8 +349,10 @@ def _run_train(args, net, device, best_path):
     pause_ev = ctx.Event()
 
     if args.workers > 0:
+        sf_worker_frac = float(np.clip(args.sf_worker_frac, 0.0, 1.0))
+        sf_enabled_workers = min(args.workers, max(0, int(round(args.workers * sf_worker_frac))))
         for wid in range(args.workers):
-            enable_sf = (not args.no_sf) and (wid % 2 == 0)
+            enable_sf = (not args.no_sf) and (wid < sf_enabled_workers)
             sf_teacher_depth = None if int(args.sf_teacher_depth) <= 0 else int(args.sf_teacher_depth)
             p = ctx.Process(target=selfplay_worker,
                             args=(wid, weights_qs[wid], out_q, stop_ev, pause_ev,
@@ -384,6 +374,7 @@ def _run_train(args, net, device, best_path):
 
         time.sleep(1)
         print("Workers alive:", [p.is_alive() for p in procs])
+        print(f"Stockfish-enabled workers: {sf_enabled_workers}/{args.workers} (frac={sf_worker_frac:.2f})")
         broadcast_weights_initial(weights_qs, net)
         print(f"Started {args.workers} self-play workers.")
 

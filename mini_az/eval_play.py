@@ -165,7 +165,7 @@ def play_vs_random(
 
             plies += 1
 
-        if board.is_game_over():
+        if board.is_game_over(claim_draw=True):
             res = board.result(claim_draw=True)
         else:
             ms = material_score(board)

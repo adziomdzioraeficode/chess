@@ -89,6 +89,7 @@ exec timeout 4h python -m mini_az --mode train \
     --sf_eval_elo 1320 \
     --sf_eval_elo_easy 0 \
     --sf_eval_max_plies 220 \
+    --sf_worker_frac 0.75 \
     --sf_boot_prob 1.0 \
     --sf_boot_time_ms 0 \
     --sf_boot_depth 8 \
