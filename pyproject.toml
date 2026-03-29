@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["mini_az"]
+omit = ["mini_az/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 25
