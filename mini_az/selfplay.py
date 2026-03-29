@@ -1,7 +1,6 @@
 """Self-play game generation and multiprocessing worker."""
 
 import io
-import math
 import os
 import random
 import time
@@ -143,6 +142,7 @@ def make_game_samples_unified(
         # Pass board history to MCTS for history-aware encoding
         visits, v_now = mcts_search(
             net_to_move, board, device, sims=sims,
+            policy_temp=1.15,
             dirichlet_alpha=da, dirichlet_eps=de,
             history=board_history[:HISTORY_STEPS],
         )
@@ -182,16 +182,13 @@ def make_game_samples_unified(
         if not visits:
             break
 
-        # Smooth exponential temperature decay (lc0-inspired)
-        # T=1.0 at ply 0 → decays smoothly → T≈0.1 by ply 40+
-        TEMP_PLY_FULL = 16   # full exploration temperature until this ply
-        TEMP_FLOOR = 0.1     # minimum temperature
-        # decay_rate=0.08 gives T≈0.73@ply20, 0.33@ply30, 0.15@ply40 (matches lc0 curve shape)
-        TEMP_DECAY_RATE = 0.08
+        TEMP_PLY_FULL = 12
         if tply < TEMP_PLY_FULL:
             temperature = 1.0
+        elif tply < 28:
+            temperature = 0.35
         else:
-            temperature = max(TEMP_FLOOR, math.exp(-TEMP_DECAY_RATE * (tply - TEMP_PLY_FULL)))
+            temperature = 0.08
 
         legals = legal_moves_canonical(board)
         legal_real = [m[3] for m in legals]
