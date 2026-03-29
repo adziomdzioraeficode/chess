@@ -159,7 +159,7 @@ def main():
     else:
         try:
             _tmp = ChessNet()
-            _tmp.load_state_dict(torch.load(opponent_path, map_location="cpu"))
+            _tmp.load_state_dict(torch.load(opponent_path, map_location="cpu", weights_only=True))
         except Exception as e:
             print(f"Opponent model incompatible ({e}). Reinitializing: {opponent_path}")
             tmp = opponent_path + f".tmp.{os.getpid()}"
@@ -172,7 +172,7 @@ def main():
 
     if os.path.exists(args.model):
         try:
-            net.load_state_dict(torch.load(args.model, map_location=device))
+            net.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
             print(f"Loaded model weights: {args.model}")
         except Exception as e:
             print(f"Could not load model weights ({e}). Starting fresh.")
@@ -800,7 +800,7 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pau
             opp_eval = ChessNet().to(device)
             opp_eval.eval()
             try:
-                opp_eval.load_state_dict(torch.load(args.opponent_model, map_location=device))
+                opp_eval.load_state_dict(torch.load(args.opponent_model, map_location=device, weights_only=True))
             except Exception as e:
                 print(f"[iter {it}] WARNING: opponent model incompatible, skipping self-eval ({e})")
                 opp_eval = None

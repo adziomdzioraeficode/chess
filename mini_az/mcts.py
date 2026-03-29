@@ -124,7 +124,10 @@ def mcts_search(
         path: List[Tuple[MCTSNode, chess.Move]] = []
         # Build history for traversal: start from root's history, keep bounded
         trav_hist = list(history[:HISTORY_STEPS]) if history else []
-        while node.expanded and not node.board.is_game_over(claim_draw=False) and len(node.edges) > 0:
+        # An expanded terminal node has no edges, so `len(node.edges) > 0`
+        # already guards against re-entering finished positions without a
+        # separate is_game_over() call on every traversal step.
+        while node.expanded and len(node.edges) > 0:
             mv, child = select(node)
             path.append((node, mv))
             # Add current board to history for the child (bounded)

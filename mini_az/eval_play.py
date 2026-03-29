@@ -13,10 +13,6 @@ from .mcts import mcts_search, pick_move_from_visits, pick_move_uci
 from .stockfish import open_stockfish_engine, elo_diff_from_score
 
 
-def sims_for_ply(base: int, plies: int) -> int:
-    return base
-
-
 def play_vs_stockfish(
     net: ChessNet,
     device: str,
@@ -149,9 +145,8 @@ def play_vs_random(
         plies = 0
         while not board.is_game_over(claim_draw=True) and plies < max_plies:
             if board.turn == our_color:
-                sims_for_random_reduced = sims_for_ply(sims, plies)
                 visits, v_now = mcts_search(
-                    net, board, device, sims=sims_for_random_reduced,
+                    net, board, device, sims=sims,
                     dirichlet_alpha=0.0,
                     dirichlet_eps=0.0,
                     history=board_history[:HISTORY_STEPS]

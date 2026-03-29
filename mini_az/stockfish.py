@@ -151,15 +151,16 @@ def open_stockfish_engine(
         engine = chess.engine.SimpleEngine.popen_uci(cmd)
     except Exception as e:
         raise RuntimeError(
-            f"Nie mogę uruchomić Stockfisha: path={stockfish_path!r}. "
-            f"Sprawdź czy plik istnieje i ma +x. Oryginalny błąd: {e}"
+            f"Cannot launch Stockfish: path={stockfish_path!r}. "
+            f"Check that the binary exists and is executable. Original error: {e}"
         )
 
     if elo is not None:
         if ("UCI_LimitStrength" not in engine.options) or ("UCI_Elo" not in engine.options):
             raise RuntimeError(
-                "Ten Stockfish nie wspiera UCI_LimitStrength/UCI_Elo -> test Elo=1320 jest niewiarygodny. "
-                f"Dostępne opcje: {list(engine.options.keys())[:40]} ..."
+                "This Stockfish build does not support UCI_LimitStrength/UCI_Elo — "
+                "Elo-limited evaluation would be unreliable. "
+                f"Available options: {list(engine.options.keys())[:40]} ..."
             )
 
     cfg = {"Threads": int(threads), "Hash": int(hash_mb)}
