@@ -103,7 +103,7 @@ exec timeout 4h python -m mini_az --mode train \
     --sf_teacher_cp_cap 600 \
     --sf_teacher_cp_soft_scale 150.0 \
     --sf_teacher_eps 0.02 \
-    --mcts_value_mix 0.25 \
+    --mcts_value_mix 0.0 \
     --moves_left_w 0.15 \
     --mix_best 0.25 \
     --mix_opp 0.15 \

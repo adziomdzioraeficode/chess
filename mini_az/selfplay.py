@@ -142,7 +142,7 @@ def make_game_samples_unified(
         # Pass board history to MCTS for history-aware encoding
         visits, v_now = mcts_search(
             net_to_move, board, device, sims=sims,
-            policy_temp=1.15,
+            policy_temp=1.0,
             dirichlet_alpha=da, dirichlet_eps=de,
             history=board_history[:HISTORY_STEPS],
         )
