@@ -358,7 +358,7 @@ def _run_train(args, net, device, best_path):
 
     if args.workers > 0:
         for wid in range(args.workers):
-            enable_sf = (not args.no_sf) and (wid % 2 == 0)
+            enable_sf = not args.no_sf
             sf_teacher_depth = None if int(args.sf_teacher_depth) <= 0 else int(args.sf_teacher_depth)
             p = ctx.Process(target=selfplay_worker,
                             args=(wid, weights_qs[wid], out_q, stop_ev, pause_ev,
@@ -890,7 +890,7 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pau
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "iter": it,
-            "sf_elo": args.sf_elo,
+            "sf_elo": args.sf_eval_elo,
             "sf_movetime_ms": args.sf_movetime_ms,
             "sf_eval_games": args.eval_games,
             "sf_eval_sims": args.eval_sims,
