@@ -1,6 +1,7 @@
 """Self-play game generation and multiprocessing worker."""
 
 import io
+import math
 import os
 import random
 import time
@@ -180,12 +181,15 @@ def make_game_samples_unified(
         if not visits:
             break
 
-        if tply < 16:
+        # Smooth exponential temperature decay (lc0-inspired)
+        # T=1.0 at ply 0 → decays smoothly → T≈0.1 by ply 40+
+        TEMP_PLY_FULL = 16   # full exploration temperature until this ply
+        TEMP_FLOOR = 0.1     # minimum temperature
+        if tply < TEMP_PLY_FULL:
             temperature = 1.0
-        elif tply < 40:
-            temperature = 0.4
         else:
-            temperature = 0.1
+            decay_rate = 0.08  # controls how fast temperature drops
+            temperature = max(TEMP_FLOOR, math.exp(-decay_rate * (tply - TEMP_PLY_FULL)))
 
         legals = legal_moves_canonical(board)
         legal_real = [m[3] for m in legals]

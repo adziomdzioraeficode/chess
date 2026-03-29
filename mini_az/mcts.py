@@ -34,6 +34,8 @@ def mcts_search(
     sims: int = 200,
     c_puct: float = 2.5,
     fpu_reduction: float = 0.25,
+    fpu_root: float = -1.0,
+    policy_temp: float = 1.4,
     dirichlet_alpha: float = 0.0,
     dirichlet_eps: float = 0.0,
     history: list = None,
@@ -43,6 +45,7 @@ def mcts_search(
     C_INIT = c_puct
 
     root = MCTSNode(root_board.copy())
+    PV_CACHE_MAX = 20_000
     pv_cache: dict[Hashable, PV] = {}
 
     # Build history list for child nodes (track position sequence)
@@ -60,6 +63,8 @@ def mcts_search(
         cached = pv_cache.get(key)
         if cached is None:
             priors, v = net.policy_value_single(node.board, device, history=hist)
+            if len(pv_cache) >= PV_CACHE_MAX:
+                pv_cache.pop(next(iter(pv_cache)))
             pv_cache[key] = (priors, v)
         else:
             priors, v = cached
@@ -67,18 +72,21 @@ def mcts_search(
         node.expanded = True
         return v
 
-    def select(node: MCTSNode) -> Tuple[chess.Move, MCTSNode]:
+    def select(node: MCTSNode, is_root: bool = False) -> Tuple[chess.Move, MCTSNode]:
         total_N = sum(e.N for e in node.edges.values()) + 1
         # Dynamic c_puct: increases with total visits (AlphaZero formula)
         c_dyn = math.log((1 + total_N + C_BASE) / C_BASE) + C_INIT
 
-        # Parent's mean Q — used as baseline for FPU
-        visited_N = sum(e.N for e in node.edges.values() if e.N > 0)
-        if visited_N > 0:
-            parent_Q = sum(e.W for e in node.edges.values() if e.N > 0) / visited_N
+        # lc0-style FPU: fixed pessimistic value at root, parent_Q − reduction at children
+        if is_root:
+            fpu_value = fpu_root
         else:
-            parent_Q = 0.0
-        fpu_value = parent_Q - fpu_reduction  # pessimistic prior for unvisited
+            visited_N = sum(e.N for e in node.edges.values() if e.N > 0)
+            if visited_N > 0:
+                parent_Q = sum(e.W for e in node.edges.values() if e.N > 0) / visited_N
+            else:
+                parent_Q = 0.0
+            fpu_value = parent_Q - fpu_reduction
 
         best_mv = None
         best_score = -1e9
@@ -111,6 +119,14 @@ def mcts_search(
 
     root_v: float = expand(root, history)
 
+    # lc0-style: apply policy softmax temperature at root to flatten priors
+    if policy_temp > 0.0 and abs(policy_temp - 1.0) > 1e-6 and root.edges:
+        priors_arr = np.array([e.P for e in root.edges.values()], dtype=np.float64)
+        priors_arr = np.power(priors_arr.clip(1e-12), 1.0 / policy_temp)
+        priors_arr /= priors_arr.sum() + 1e-12
+        for i, e in enumerate(root.edges.values()):
+            e.P = float(priors_arr[i])
+
     if dirichlet_alpha > 0:
         moves = list(root.edges.keys())
         if moves:
@@ -128,7 +144,7 @@ def mcts_search(
         # already guards against re-entering finished positions without a
         # separate is_game_over() call on every traversal step.
         while node.expanded and len(node.edges) > 0:
-            mv, child = select(node)
+            mv, child = select(node, is_root=(node is root))
             path.append((node, mv))
             # Add current board to history for the child (bounded)
             trav_hist = [node.board] + trav_hist[:HISTORY_STEPS - 1]

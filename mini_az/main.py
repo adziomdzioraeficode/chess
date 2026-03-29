@@ -333,11 +333,20 @@ def _run_train(args, net, device, best_path):
         pg['lr'] = args.lr
         pg.pop('initial_lr', None)
     remaining_iters = max(1, args.iters - start_iter)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=remaining_iters * args.steps_per_iter, eta_min=args.lr * 0.01
+    total_steps = remaining_iters * args.steps_per_iter
+    warmup_steps = max(1, int(total_steps * 0.02))  # 2% linear warmup (lc0-style)
+    cosine_steps = total_steps - warmup_steps
+    warmup_sched = torch.optim.lr_scheduler.LinearLR(
+        opt, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
     )
-    print(f"LR schedule: base={args.lr} eta_min={args.lr*0.01:.2e} "
-          f"T_max={remaining_iters}*{args.steps_per_iter}={remaining_iters*args.steps_per_iter} steps")
+    cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=max(1, cosine_steps), eta_min=args.lr * 0.01
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_steps]
+    )
+    print(f"LR schedule: warmup {warmup_steps} steps → cosine {cosine_steps} steps "
+          f"(base={args.lr} eta_min={args.lr*0.01:.2e} total={total_steps})")
 
     ctx = mp.get_context("spawn")
     weights_qs = [ctx.Queue(maxsize=1) for _ in range(args.workers)]
