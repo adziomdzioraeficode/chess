@@ -23,7 +23,8 @@ def _make_sample(n_moves=5, z=0.5):
     moves_pr = np.zeros(n_moves, dtype=np.int64)
     pi = np.random.dirichlet(np.ones(n_moves)).astype(np.float32)
     wdl = np.array([0.4, 0.2, 0.4], dtype=np.float32)
-    return Sample(board_planes, moves_fs, moves_ts, moves_pr, pi, z, wdl)
+    plies_left = float(np.random.randint(0, 120))
+    return Sample(board_planes, moves_fs, moves_ts, moves_pr, pi, z, wdl, plies_left)
 
 
 class TestSample:
@@ -34,6 +35,7 @@ class TestSample:
         assert len(s.target_pi) == 5
         assert abs(s.target_pi.sum() - 1.0) < 1e-5
         assert s.wdl.shape == (3,)
+        assert s.plies_left >= 0.0
 
 
 class TestReplayBuffer:
@@ -59,7 +61,7 @@ class TestReplayBuffer:
     def test_sample_batch_mixed(self):
         rb = ReplayBuffer(maxlen=1000)
         rb.add_game([_make_sample() for _ in range(100)])
-        batch = rb.sample_batch_mixed(16, recent_frac=0.75, recent_window=50)
+        batch = rb.sample_batch_mixed(16, recent_frac=0.75, recent_window=50, sharp_frac=0.25, sharp_threshold=0.25)
         assert len(batch) == 16
 
     def test_sample_batch_mixed_empty(self):
@@ -131,21 +133,27 @@ class TestFlipSampleLR:
         flipped = flip_sample_lr(s)
         np.testing.assert_array_equal(flipped.wdl, s.wdl)
 
+    def test_flip_preserves_plies_left(self):
+        s = _make_sample()
+        flipped = flip_sample_lr(s)
+        assert flipped.plies_left == s.plies_left
+
 
 class TestCollate:
     def test_basic_collation(self):
         samples = [_make_sample(n_moves=n) for n in [3, 5, 4]]
-        boards, fs, ts, pr, mask, target_pi, z, wdl = collate(samples, "cpu")
+        boards, fs, ts, pr, mask, target_pi, z, wdl, plies_left = collate(samples, "cpu")
         assert boards.shape == (3, INPUT_PLANES, 8, 8)
         assert fs.shape[0] == 3
         assert fs.shape[1] == 5  # max moves
         assert mask.shape == (3, 5)
         assert z.shape == (3,)
         assert wdl.shape == (3, 3)
+        assert plies_left.shape == (3,)
 
     def test_masking_correctness(self):
         samples = [_make_sample(n_moves=2), _make_sample(n_moves=4)]
-        _, _, _, _, mask, _, _, _ = collate(samples, "cpu")
+        _, _, _, _, mask, _, _, _, _ = collate(samples, "cpu")
         # Padding positions should be masked out
         assert mask.shape[1] == 4  # max
         # First sample has 2 moves → positions 2,3 should be False
@@ -154,7 +162,7 @@ class TestCollate:
 
     def test_target_pi_sums(self):
         samples = [_make_sample(n_moves=5) for _ in range(4)]
-        _, _, _, _, mask, target_pi, _, _ = collate(samples, "cpu")
+        _, _, _, _, mask, target_pi, _, _, _ = collate(samples, "cpu")
         for i in range(4):
             active = target_pi[i][mask[i]]
             assert abs(active.sum().item() - 1.0) < 1e-4
@@ -193,6 +201,9 @@ class TestTrainStep:
         assert "v_mean" in metrics
         assert "z_mean" in metrics
         assert "vz_corr" in metrics
+        assert "ml" in metrics
+        assert "ml_mean" in metrics
+        assert "ml_tgt_mean" in metrics
         assert metrics["loss"] > 0
         assert metrics["grad_norm"] > 0
 

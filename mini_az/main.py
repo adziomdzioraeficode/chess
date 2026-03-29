@@ -68,6 +68,7 @@ def main():
     ap.add_argument("--rand_eval_games", type=int, default=6)
     ap.add_argument("--rand_eval_sims", type=int, default=32)
     ap.add_argument("--rand_max_plies", type=int, default=120)
+    ap.add_argument("--sf_eval_max_plies", type=int, default=220)
 
     ap.add_argument("--save_dir", default="models")
     ap.add_argument("--save_every", type=int, default=10)
@@ -100,6 +101,8 @@ def main():
 
     ap.add_argument("--recent_frac", type=float, default=0.6)
     ap.add_argument("--recent_window", type=int, default=300_000)
+    ap.add_argument("--sharp_frac", type=float, default=0.20)
+    ap.add_argument("--sharp_threshold", type=float, default=0.35)
 
     ap.add_argument("--sf_boot_prob", type=float, default=1.0)
     ap.add_argument("--sf_boot_time_ms", type=int, default=20)
@@ -117,6 +120,7 @@ def main():
 
     ap.add_argument("--clear_buffer", action="store_true",
                     help="Discard replay buffer on startup (keep model weights)")
+    ap.add_argument("--moves_left_w", type=float, default=0.15)
 
     args = ap.parse_args()
     # Dump all args for reproducibility
@@ -185,7 +189,7 @@ def main():
             net, device,
             stockfish_path=args.sf_path, sf_skill=args.sf_skill,
             sf_movetime_ms=args.sf_movetime_ms, games=args.eval_games,
-            sims=args.eval_sims, sf_elo=args.sf_elo, max_plies=args.rand_max_plies
+            sims=args.eval_sims, sf_elo=args.sf_elo, max_plies=args.sf_eval_max_plies
         )
         rnd_score, rnd_winrate, rnd_elo_diff = play_vs_random(
             net, device, games=args.rand_eval_games,
@@ -501,10 +505,12 @@ def _run_train(args, net, device, best_path):
                     continue
                 batch_s = rb.sample_batch_mixed(
                     args.batch, recent_frac=args.recent_frac,
-                    recent_window=args.recent_window
+                    recent_window=args.recent_window,
+                    sharp_frac=args.sharp_frac,
+                    sharp_threshold=args.sharp_threshold,
                 )
                 batch = collate(batch_s, device)
-                m = train_step(net, opt, batch, val_w=args.val_w)
+                m = train_step(net, opt, batch, val_w=args.val_w, moves_left_w=args.moves_left_w)
                 scheduler.step()
                 last_m = m
                 is_log_step = ((step + 1) % max(1, args.steps_per_iter // 5) == 0) or (step + 1 == args.steps_per_iter)
@@ -512,10 +518,11 @@ def _run_train(args, net, device, best_path):
                     cur_lr = scheduler.get_last_lr()[0]
                     print(
                         f"[iter {it}] step {step+1}/{args.steps_per_iter} "
-                        f"loss={m['loss']:.4f} pol={m['pol']:.4f} val={m['val']:.4f} "
+                        f"loss={m['loss']:.4f} pol={m['pol']:.4f} val={m['val']:.4f} ml={m['ml']:.4f} "
                         f"grad={m['grad_norm']:.2f} "
                         f"H(pred)={m['pred_ent']:.2f} H(tgt)={m['tgt_ent']:.2f} "
                         f"v_mean={m['v_mean']:+.3f} z_mean={m['z_mean']:+.3f} corr(v,z)={m['vz_corr']:+.2f} "
+                        f"ml_mean={m['ml_mean']:.1f} ml_tgt={m['ml_tgt_mean']:.1f} "
                         f"lr={cur_lr:.2e}"
                     )
             t_tr = time.time() - t_tr0
@@ -680,12 +687,15 @@ def _log_iteration_csv(args, it, c, games_collected, res_counts, avg_plies,
         "loss": round(last_m["loss"], 5) if last_m else "",
         "pol_loss": round(last_m["pol"], 5) if last_m else "",
         "val_loss": round(last_m["val"], 5) if last_m else "",
+        "ml_loss": round(last_m["ml"], 5) if last_m else "",
         "grad_norm": round(last_m["grad_norm"], 3) if last_m else "",
         "pred_ent": round(last_m["pred_ent"], 3) if last_m else "",
         "tgt_ent": round(last_m["tgt_ent"], 3) if last_m else "",
         "v_mean": round(last_m["v_mean"], 4) if last_m else "",
         "z_mean": round(last_m["z_mean"], 4) if last_m else "",
         "vz_corr": round(last_m["vz_corr"], 4) if last_m else "",
+        "ml_mean": round(last_m["ml_mean"], 2) if last_m else "",
+        "ml_tgt_mean": round(last_m["ml_tgt_mean"], 2) if last_m else "",
         "lr": f"{cur_lr:.2e}",
         # timing
         "selfplay_time_s": round(t_sp, 1),
@@ -752,7 +762,7 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pau
         sf_score, sf_winrate, sf_elo_diff = play_vs_stockfish(
             net, device, stockfish_path=args.sf_path, sf_skill=args.sf_skill,
             sf_elo=args.sf_eval_elo, sf_movetime_ms=args.sf_movetime_ms,
-            games=args.eval_games, sims=args.eval_sims, max_plies=args.rand_max_plies
+            games=args.eval_games, sims=args.eval_sims, max_plies=args.sf_eval_max_plies
         )
 
         # Optional easy SF eval (using Skill Level, not Elo — since min UCI_Elo=1320)
@@ -765,7 +775,7 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pau
             sf_easy_score, sf_easy_winrate, sf_easy_elo_diff = play_vs_stockfish(
                 net, device, stockfish_path=args.sf_path, sf_skill=args.sf_skill,
                 sf_elo=args.sf_eval_elo, sf_movetime_ms=args.sf_movetime_ms,
-                games=args.eval_games, sims=args.eval_sims, max_plies=args.rand_max_plies,
+                games=args.eval_games, sims=args.eval_sims, max_plies=args.sf_eval_max_plies,
                 use_skill_level=skill_lvl,
             )
             print(f"[iter {it}] eval vs SF Skill={skill_lvl}: "
@@ -840,9 +850,15 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pau
         elif sf_score > 0.05:
             gate_kind = "sf_score"
             metric = float(sf_score)
+        elif args.sf_eval_elo_easy >= 0 and sf_easy_score > 0.05:
+            gate_kind = "sf_easy_score"
+            metric = float(sf_easy_score)
         elif sf_winrate >= 0.02:
             gate_kind = "sf_win"
             metric = float(sf_winrate)
+        elif args.sf_eval_elo_easy >= 0 and sf_easy_winrate >= 0.02:
+            gate_kind = "sf_easy_win"
+            metric = float(sf_easy_winrate)
         else:
             gate_kind = "rnd"
             metric = float(rnd_score)
@@ -890,7 +906,7 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pau
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "iter": it,
-            "sf_elo": args.sf_elo,
+            "sf_elo": args.sf_eval_elo,
             "sf_movetime_ms": args.sf_movetime_ms,
             "sf_eval_games": args.eval_games,
             "sf_eval_sims": args.eval_sims,

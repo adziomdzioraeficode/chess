@@ -1,4 +1,4 @@
-"""Tests for mini_az.network — ChessNet architecture, forward pass, WDL head."""
+"""Tests for mini_az.network — ChessNet architecture, forward pass, WDL and ML heads."""
 
 import chess
 import numpy as np
@@ -53,9 +53,10 @@ class TestChessNet:
         pr = torch.randint(0, 5, (B, L))
         mask = torch.ones(B, L, dtype=torch.bool)
 
-        logits, wdl_logits = net.forward_policy_value(boards, fs, ts, pr, mask)
+        logits, wdl_logits, moves_left = net.forward_policy_value(boards, fs, ts, pr, mask)
         assert logits.shape == (B, L)
         assert wdl_logits.shape == (B, 3)
+        assert moves_left.shape == (B,)
 
     def test_masked_moves_are_neg_inf(self):
         net = ChessNet()
@@ -67,7 +68,7 @@ class TestChessNet:
         pr = torch.zeros(B, L, dtype=torch.long)
         mask = torch.tensor([[True, True, False, False, False]])
 
-        logits, _ = net.forward_policy_value(boards, fs, ts, pr, mask)
+        logits, _, _ = net.forward_policy_value(boards, fs, ts, pr, mask)
         assert logits[0, 2].item() == float("-inf")
         assert logits[0, 0].item() != float("-inf")
 
@@ -81,9 +82,22 @@ class TestChessNet:
         pr = torch.zeros(B, L, dtype=torch.long)
         mask = torch.ones(B, L, dtype=torch.bool)
 
-        _, wdl_logits = net.forward_policy_value(boards, fs, ts, pr, mask)
+        _, wdl_logits, _ = net.forward_policy_value(boards, fs, ts, pr, mask)
         wdl_probs = torch.softmax(wdl_logits, dim=-1)
         assert abs(wdl_probs.sum().item() - 1.0) < 1e-5
+
+    def test_moves_left_is_nonnegative(self):
+        net = ChessNet()
+        net.eval()
+        B, L = 2, 4
+        boards = torch.randn(B, INPUT_PLANES, 8, 8)
+        fs = torch.randint(0, 64, (B, L))
+        ts = torch.randint(0, 64, (B, L))
+        pr = torch.zeros(B, L, dtype=torch.long)
+        mask = torch.ones(B, L, dtype=torch.bool)
+
+        _, _, moves_left = net.forward_policy_value(boards, fs, ts, pr, mask)
+        assert torch.all(moves_left >= 0.0)
 
 
 class TestPolicyValueSingle:
