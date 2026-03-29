@@ -1,6 +1,7 @@
 """Self-play game generation and multiprocessing worker."""
 
 import io
+import math
 import os
 import random
 import time
@@ -52,7 +53,7 @@ def _serialize_state_dict(sd: dict) -> bytes:
 
 def _deserialize_state_dict(b: bytes, map_location="cpu") -> dict:
     bio = io.BytesIO(b)
-    return torch.load(bio, map_location=map_location)
+    return torch.load(bio, map_location=map_location, weights_only=True)
 
 
 def broadcast_weights(weights_qs, net: ChessNet):
@@ -91,7 +92,6 @@ def make_game_samples_unified(
     net_black: ChessNet | None = None,
     train_only_color: bool | None = None,
     max_plies: int = 250,
-    temp_moves: int = 20,
     resign_threshold: float = -0.995,
     resign_patience: int = 20,
     dirichlet_alpha: float = 0.3,
@@ -99,11 +99,8 @@ def make_game_samples_unified(
     claim_draw: bool = False,
     opening_random_plies: int = 8,
     material_adjudicate: int = 5,
-    draw_mat_w: float = 0.25,
     mcts_value_mix: float = 0.5,
     sf_mate_cp: int = 10000,
-    bootstrap_on_star: bool = False,
-    bootstrap_net: ChessNet | None = None,
     sf_engine: chess.engine.SimpleEngine | None = None,
     sf_bootstrap_on_star: bool = False,
     sf_boot_depth: int | None = None,
@@ -117,7 +114,6 @@ def make_game_samples_unified(
     sf_teacher_eps: float = 0.01,
 ):
     net_black = net_white if net_black is None else net_black
-    bootstrap_net = net_white if bootstrap_net is None else bootstrap_net
 
     forced_res = None
     forced_kind = ""
@@ -185,12 +181,16 @@ def make_game_samples_unified(
         if not visits:
             break
 
-        if tply < 16:
+        # Smooth exponential temperature decay (lc0-inspired)
+        # T=1.0 at ply 0 → decays smoothly → T≈0.1 by ply 40+
+        TEMP_PLY_FULL = 16   # full exploration temperature until this ply
+        TEMP_FLOOR = 0.1     # minimum temperature
+        # decay_rate=0.08 gives T≈0.73@ply20, 0.33@ply30, 0.15@ply40 (matches lc0 curve shape)
+        TEMP_DECAY_RATE = 0.08
+        if tply < TEMP_PLY_FULL:
             temperature = 1.0
-        elif tply < 40:
-            temperature = 0.4
         else:
-            temperature = 0.1
+            temperature = max(TEMP_FLOOR, math.exp(-TEMP_DECAY_RATE * (tply - TEMP_PLY_FULL)))
 
         legals = legal_moves_canonical(board)
         legal_real = [m[3] for m in legals]
@@ -495,7 +495,7 @@ def selfplay_worker(
 
         try:
             if os.path.exists(best_path):
-                sd = torch.load(best_path, map_location="cpu")
+                sd = torch.load(best_path, map_location="cpu", weights_only=True)
                 best_net.load_state_dict(sd)
                 best_mtime = os.stat(best_path).st_mtime
         except Exception:
@@ -510,7 +510,7 @@ def selfplay_worker(
             try:
                 st = os.stat(best_path)
                 if st.st_mtime > best_mtime:
-                    sd = torch.load(best_path, map_location="cpu")
+                    sd = torch.load(best_path, map_location="cpu", weights_only=True)
                     best_net.load_state_dict(sd)
                     best_mtime = st.st_mtime
             except Exception:
@@ -523,7 +523,7 @@ def selfplay_worker(
 
         try:
             if os.path.exists(opp_path):
-                sd = torch.load(opp_path, map_location="cpu")
+                sd = torch.load(opp_path, map_location="cpu", weights_only=True)
                 opp_net.load_state_dict(sd)
                 opp_mtime = os.stat(opp_path).st_mtime
         except Exception:
@@ -538,7 +538,7 @@ def selfplay_worker(
             try:
                 st = os.stat(opp_path)
                 if st.st_mtime > opp_mtime:
-                    sd = torch.load(opp_path, map_location="cpu")
+                    sd = torch.load(opp_path, map_location="cpu", weights_only=True)
                     opp_net.load_state_dict(sd)
                     opp_mtime = st.st_mtime
             except Exception:

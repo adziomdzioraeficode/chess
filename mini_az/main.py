@@ -159,7 +159,7 @@ def main():
     else:
         try:
             _tmp = ChessNet()
-            _tmp.load_state_dict(torch.load(opponent_path, map_location="cpu"))
+            _tmp.load_state_dict(torch.load(opponent_path, map_location="cpu", weights_only=True))
         except Exception as e:
             print(f"Opponent model incompatible ({e}). Reinitializing: {opponent_path}")
             tmp = opponent_path + f".tmp.{os.getpid()}"
@@ -172,7 +172,7 @@ def main():
 
     if os.path.exists(args.model):
         try:
-            net.load_state_dict(torch.load(args.model, map_location=device))
+            net.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
             print(f"Loaded model weights: {args.model}")
         except Exception as e:
             print(f"Could not load model weights ({e}). Starting fresh.")
@@ -333,11 +333,21 @@ def _run_train(args, net, device, best_path):
         pg['lr'] = args.lr
         pg.pop('initial_lr', None)
     remaining_iters = max(1, args.iters - start_iter)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=remaining_iters * args.steps_per_iter, eta_min=args.lr * 0.01
+    total_steps = remaining_iters * args.steps_per_iter
+    WARMUP_FRAC = 0.02  # 2% linear warmup (lc0-style: stabilises early training with random weights)
+    warmup_steps = max(1, int(total_steps * WARMUP_FRAC))
+    cosine_steps = total_steps - warmup_steps
+    warmup_sched = torch.optim.lr_scheduler.LinearLR(
+        opt, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
     )
-    print(f"LR schedule: base={args.lr} eta_min={args.lr*0.01:.2e} "
-          f"T_max={remaining_iters}*{args.steps_per_iter}={remaining_iters*args.steps_per_iter} steps")
+    cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=max(1, cosine_steps), eta_min=args.lr * 0.01
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_steps]
+    )
+    print(f"LR schedule: warmup {warmup_steps} steps → cosine {cosine_steps} steps "
+          f"(base={args.lr} eta_min={args.lr*0.01:.2e} total={total_steps})")
 
     ctx = mp.get_context("spawn")
     weights_qs = [ctx.Queue(maxsize=1) for _ in range(args.workers)]
@@ -480,8 +490,8 @@ def _run_train(args, net, device, best_path):
             old_train_nt = torch.get_num_threads()
             if args.workers > 0:
                 pause_ev.set()
-                time.sleep(0.5)  # let workers finish current inference
-                torch.set_num_threads(min(48, max(8, args.workers)))
+                time.sleep(3)  # workers pause between games; wait for stragglers
+                torch.set_num_threads(min(32, max(8, args.workers)))
             t_tr0 = time.time()
             net.train()
             last_m = None
@@ -736,7 +746,7 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pau
 
     old_nt = torch.get_num_threads()
     try:
-        torch.set_num_threads(min(48, max(8, args.workers)))
+        torch.set_num_threads(min(32, max(8, args.workers)))
         net.eval()
         print(f"Starting {args.eval_games} SF plays (elo={args.sf_eval_elo})")
         sf_score, sf_winrate, sf_elo_diff = play_vs_stockfish(
@@ -800,7 +810,7 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pau
             opp_eval = ChessNet().to(device)
             opp_eval.eval()
             try:
-                opp_eval.load_state_dict(torch.load(args.opponent_model, map_location=device))
+                opp_eval.load_state_dict(torch.load(args.opponent_model, map_location=device, weights_only=True))
             except Exception as e:
                 print(f"[iter {it}] WARNING: opponent model incompatible, skipping self-eval ({e})")
                 opp_eval = None
