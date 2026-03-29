@@ -1,12 +1,16 @@
 #!/bin/bash
 # train_fresh_v3.sh — v3: 45 planes + 10×96 SE-ResNet (~5.5M) + WDL + dynamic c_puct
 #
-# V3 ARCHITECTURE:
+# V3 ARCHITECTURE (lc0-inspired home Python RL chess):
 #   - 45 input planes: 3 positions × 12 piece planes + 9 aux (castling, turn, halfmove, fullmove, check, repetition)
 #   - 10 SE-residual blocks × 96 channels (~5.5M parameters)
-#   - WDL value head (win/draw/loss softmax) — replaces single tanh
+#   - WDL value head (win/draw/loss softmax) — replaces single tanh (like lc0 T40+)
 #   - Move-embedding policy head (from/to/promo embeddings)
-#   - Dynamic c_puct: log((1+N+19652)/19652) + 2.5  (AlphaZero formula)
+#   - Dynamic c_puct: log((1+N+19652)/19652) + 2.5  (AlphaZero/lc0 formula)
+#   - lc0-style MCTS: root FPU=-1.0, child FPU=parent_Q-0.25, policy_temp=1.4 at root
+#   - Smooth temperature decay: T=1.0 for ply<16, exp(-0.08*(ply-16)) after (lc0 curve)
+#   - PV cache limited to 20K entries (prevents OOM in long games)
+#   - LR schedule: 2% linear warmup → cosine decay (lc0-style stabilises random init)
 #   - Repetition plane: 0.0 (new) / 0.5 (2nd occurrence) / 1.0 (threefold)
 #   - Halfmove clock scaled /50 (chess rule: 50-move draw)
 #   - Clean pi_target: MCTS visits + SF teacher blend, no repetition penalty
@@ -15,28 +19,44 @@
 #
 # INCOMPATIBLE with v1/v2 models.  Clean start required.
 #
-# Target: Azure Standard_D96s_v6 (48 physical / 96 HT cores, AMD EPYC 9004)
+# Target: Azure Standard_Ds96_v6 (48 physical / 96 HT cores, AMD EPYC 9004)
+# Time budget: 4 hours (14400s)
+# Goal: beat Stockfish 1320 Elo (like lc0 early nets but as a home RL project)
 #
-# Tuning rationale (v3 vs v2):
+# Tuning rationale (4h on Ds96v6):
 #   - Network 2× bigger (5.5M vs 3.3M) → inference ~1.7× slower per search
-#   - 80 workers optimal on D96s v6 (bench: 60 searches/s at 32 sims)
+#   - 80 workers optimal on Ds96v6 (bench: 60 searches/s at 32 sims)
 #   - Training uses 32 threads during pause (bench: ~5 steps/s@batch512)
 #   - SF teacher depth-8 multipv-5: ~50ms/call, 80% prob → ~40% effective blend
 #   - mp_sims=32: 2× more games/iter vs 64 sims — faster iteration, key early on
 #   - steps_per_iter=200: more gradient steps to utilise the extra games
 #   - Expected iter time: ~80s selfplay + ~40s train = ~120s/iter
-#   - 8h ≈ ~240 iters
+#   - 4h ≈ ~120 iters (hard timeout enforced)
 #
-# Strategy:
-#   - Phase 1 (iter 1-30):  Heavy SF distillation, random init → basic piece values
-#   - Phase 2 (iter 30-80): Network starts learning tactics from SF blend
-#   - Phase 3 (iter 80+):   Cosine LR decay, should start beating random consistently
-#   - Target: beat SF Skill Level 0 (~1000 Elo) by iter ~100
+# Strategy (compressed for 4h):
+#   - Phase 1 (iter 1-20):  Heavy SF distillation, random init → basic piece values
+#                            (LR warmup: 2% of total steps @ 0.01× → 1× base LR)
+#   - Phase 2 (iter 20-60): Network starts learning tactics from SF blend
+#   - Phase 3 (iter 60+):   Cosine LR decay, should start beating random consistently
+#   - Target: beat SF 1320 Elo — evaluate every 5 iters to track progress
+#
+# Reference: lc0 (github.com/LeelaChessZero/lc0) does this at scale with C++/CUDA.
+# We replicate the key ideas (MCTS+NN, WDL, teacher distillation, FPU, policy temp)
+# in a home Python project to learn RL and reach competitive play vs SF 1320.
 #
 set -euo pipefail
 
 if [ -f .venv/bin/activate ]; then
     source .venv/bin/activate
+fi
+
+# --- Run tests before training to catch regressions ---
+echo "=== Running test suite (pre-training sanity check) ==="
+if python -m pytest tests/ -x -q --tb=short 2>/dev/null; then
+    echo "All tests passed. Proceeding with training."
+else
+    echo "WARNING: Some tests failed. Review before training."
+    echo "Continuing anyway (training is idempotent)."
 fi
 
 # Clean old incompatible artifacts (new architecture v3)
@@ -47,7 +67,8 @@ echo "Done. Starting v3 training from scratch."
 
 mkdir -p models
 
-exec python -m mini_az --mode train \
+# 4h hard timeout — ensures VM cost stays bounded
+exec timeout 4h python -m mini_az --mode train \
     --workers 80 \
     --mp_sims 32 \
     --games_per_iter 120 \

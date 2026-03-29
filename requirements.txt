@@ -2,6 +2,8 @@ chess
 numpy
 tqdm
 torch==2.7.0
+pytest>=8.0
+pytest-cov>=5.0
 
 --extra-index-url https://download.pytorch.org/whl/cu118
 
