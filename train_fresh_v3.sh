@@ -19,12 +19,11 @@
 #
 # Tuning rationale (v3 vs v2):
 #   - Network 2× bigger (5.5M vs 3.3M) → inference ~1.7× slower per search
-#   - Reduced workers 80→72 to avoid over-subscription on bigger net
-#   - Training uses 32 threads during pause (workers stopped → all cores free)
-#   - games_per_iter=120 unchanged; slower per-game but total wall still ~3min
-#   - SF teacher depth-14 multipv-5: ~20-40ms/call, 80% prob → ~40% effective blend
-#   - Expected iter time: ~180-220s selfplay + ~25-35s train = ~210-250s
-#   - 8h ≈ ~115-135 iters   (run bench_v3.py for exact numbers)
+#   - 80 workers optimal on D96s v6 (bench: 60 searches/s at 64 sims)
+#   - Training uses 32 threads during pause (bench: 5.0 steps/s@batch512)
+#   - SF teacher depth-14 multipv-5: ~148ms/call, 80% prob → ~40% effective blend
+#   - Expected iter time: ~140s selfplay + ~20s train = ~160s/iter
+#   - 8h ≈ ~180 iters
 #
 # Strategy:
 #   - Phase 1 (iter 1-30):  Heavy SF distillation, random init → basic piece values
@@ -47,7 +46,7 @@ echo "Done. Starting v3 training from scratch."
 mkdir -p models
 
 exec python -m mini_az --mode train \
-    --workers 72 \
+    --workers 80 \
     --mp_sims 64 \
     --games_per_iter 120 \
     --iters 9999 \

@@ -296,7 +296,6 @@ def main():
         if r is None:
             print(f"  {nw:>7} {'FAILED':>12}")
             continue
-        marker = ""
         if r["throughput"] > best_tp:
             best_tp = r["throughput"]
             best_nw = nw
@@ -356,7 +355,7 @@ def main():
     single_game_time_s = avg_searches_per_game * sc["mcts_64_ms"] / 1000
 
     if "error" not in sf:
-        sf_overhead_s = avg_searches_per_game * 0.5 * sf["depth_14_ms"] / 1000  # 50% teacher prob
+        sf_overhead_s = avg_searches_per_game * 0.8 * sf["depth_14_ms"] / 1000  # 80% teacher prob
         single_game_time_s += sf_overhead_s
 
     games_per_iter = 120

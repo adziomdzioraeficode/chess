@@ -347,10 +347,7 @@ def make_game_samples_unified(
         else:
             sf_fail = 1
 
-    z_draw_white = 0.0
-    if winner is None:
-        # Clean draw: z=0.  SF bootstrap overrides this if available.
-        z_draw_white = 0.0
+    z_draw_white = 0.0  # Clean draw; SF bootstrap overrides if available
 
     if winner == chess.WHITE:
         z_white_end = 1.0
