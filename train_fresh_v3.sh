@@ -50,6 +50,10 @@ set -euo pipefail
 
 if [ -f .venv/bin/activate ]; then
     source .venv/bin/activate
+elif [ -f "$HOME/mypipenv/bin/activate" ]; then
+    source "$HOME/mypipenv/bin/activate"
+elif [ -f "$HOME/mypythonenv/bin/activate" ]; then
+    source "$HOME/mypythonenv/bin/activate"
 fi
 
 # --- Run tests before training to catch regressions ---
@@ -71,11 +75,11 @@ mkdir -p models
 
 # 4h hard timeout — ensures VM cost stays bounded
 exec timeout 4h python -m mini_az --mode train \
-    --workers 80 \
+    --workers 92 \
     --mp_sims 32 \
     --games_per_iter 120 \
     --iters 9999 \
-    --steps_per_iter 200 \
+    --steps_per_iter 150 \
     --batch 512 \
     --lr 1e-3 \
     --buffer 500000 \
