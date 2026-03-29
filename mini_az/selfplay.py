@@ -154,7 +154,8 @@ def make_game_samples_unified(
                or board.can_claim_fifty_moves()
                or board.halfmove_clock >= NO_PROGRESS_HALFMOVE)
 
-        if drawish_now and adv < 2 and (board.ply() - ply0) > 160 and abs(v_now) < 0.15:
+        draw_claim_min_ply = max(60, int(0.55 * max_plies))
+        if drawish_now and adv < 2 and (board.ply() - ply0) > draw_claim_min_ply and abs(v_now) < 0.15:
             draw_claim_streak += 1
         else:
             draw_claim_streak = 0
@@ -163,7 +164,7 @@ def make_game_samples_unified(
             forced_kind = "draw_claim"
             break
 
-        RESIGN_MIN_PLY = 80
+        RESIGN_MIN_PLY = min(80, max(30, max_plies // 3))
         if tply >= RESIGN_MIN_PLY:
             if v_now < resign_threshold:
                 bad_streak += 1
@@ -284,7 +285,7 @@ def make_game_samples_unified(
         ts = np.array([m[1] for m in legals], dtype=np.int64)
         pr = np.array([m[2] for m in legals], dtype=np.int64)
         if train_only_color is None or board.turn == train_only_color:
-            trajectory.append((bt, fs, ts, pr, pi_target.astype(np.float32), board.turn, float(v_now)))
+            trajectory.append((bt, fs, ts, pr, pi_target.astype(np.float32), board.turn, float(v_now), int(tply)))
 
         chosen_mv = legal_real[idx]
         # Update history: prepend current board before pushing move
@@ -358,7 +359,8 @@ def make_game_samples_unified(
 
     samples = []
     lam = float(np.clip(mcts_value_mix, 0.0, 1.0))
-    for bt, fs, ts, pr, pi, turn, v_mcts in trajectory:
+    final_tply = max(0, board.ply() - ply0)
+    for bt, fs, ts, pr, pi, turn, v_mcts, sample_tply in trajectory:
         z_game = z_white_end if turn == chess.WHITE else -z_white_end
         z_target = (1.0 - lam) * float(z_game) + lam * float(v_mcts)
         z_target = float(np.clip(z_target, -1.0, 1.0))
@@ -372,7 +374,8 @@ def make_game_samples_unified(
             wdl = np.array([0.0, 1.0 + z_target, -z_target], dtype=np.float32)
         else:
             wdl = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        samples.append(Sample(bt, fs, ts, pr, pi.astype(np.float32), z_target, wdl))
+        plies_left = float(max(0, final_tply - int(sample_tply)))
+        samples.append(Sample(bt, fs, ts, pr, pi.astype(np.float32), z_target, wdl, plies_left))
 
     info = {
         "avg_pi_ent": float(np.mean(pi_ents)) if pi_ents else 0.0,

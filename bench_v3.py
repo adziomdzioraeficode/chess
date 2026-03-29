@@ -173,7 +173,7 @@ def bench_training(thread_counts, batch_size=512, steps=20):
     wdl = np.array([0.0, 1.0, 0.0], dtype=np.float32)
 
     buf = ReplayBuffer(10000)
-    samples = [Sample(t.numpy(), fs, ts, pr, pi, 0.0, wdl) for _ in range(2000)]
+    samples = [Sample(t.numpy(), fs, ts, pr, pi, 0.0, wdl, 40.0) for _ in range(2000)]
     buf.add_game(samples)
 
     results = {}

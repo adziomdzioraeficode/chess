@@ -74,6 +74,9 @@ class ChessNet(nn.Module):
         # WDL value head: 3 outputs (win, draw, loss) instead of single tanh
         self.val_fc1 = nn.Linear(board_dim, board_dim)
         self.val_fc2 = nn.Linear(board_dim, 3)
+        # Moves-left head: regularizes search toward faster conversion / less shuffling.
+        self.ml_fc1 = nn.Linear(board_dim, board_dim // 2)
+        self.ml_fc2 = nn.Linear(board_dim // 2, 1)
 
     def encode_board(self, x):
         x = F.relu(self.stem_gn(self.stem(x)))
@@ -91,10 +94,11 @@ class ChessNet(nn.Module):
         promos: torch.Tensor,
         mask: torch.Tensor,
     ):
-        """Returns (policy_logits, wdl_logits).
+        """Returns (policy_logits, wdl_logits, moves_left_pred).
 
         wdl_logits: (B, 3) raw logits for [win, draw, loss].
         Use softmax to get probabilities, then v = P(win) - P(loss) for scalar value.
+        moves_left_pred: (B,) predicted remaining plies to game end.
         """
         B, L = from_sqs.shape
         bemb = self.encode_board(board_tensor)
@@ -110,7 +114,10 @@ class ChessNet(nn.Module):
         vh = F.relu(self.val_fc1(bemb))
         vh = F.dropout(vh, p=self.dropout, training=self.training)
         wdl_logits = self.val_fc2(vh)  # (B, 3)
-        return logits, wdl_logits
+        mh = F.relu(self.ml_fc1(bemb))
+        mh = F.dropout(mh, p=self.dropout, training=self.training)
+        moves_left = F.softplus(self.ml_fc2(mh)).squeeze(-1)
+        return logits, wdl_logits, moves_left
 
     @torch.no_grad()
     def policy_value_single(self, board: chess.Board, device: str,
@@ -125,7 +132,7 @@ class ChessNet(nn.Module):
         pr = torch.tensor([[m[2] for m in moves]], dtype=torch.long, device=device)
         mask = torch.ones((1, len(moves)), dtype=torch.bool, device=device)
 
-        logits, wdl_logits = self.forward_policy_value(bt, fs, ts, pr, mask)
+        logits, wdl_logits, _ = self.forward_policy_value(bt, fs, ts, pr, mask)
         probs = torch.softmax(logits[0], dim=0).detach().cpu().numpy()
         priors = {moves[i][3]: float(probs[i]) for i in range(len(moves))}
         # Convert WDL to scalar: v = P(win) - P(loss)

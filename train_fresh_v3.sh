@@ -16,6 +16,8 @@
 #   - Clean pi_target: MCTS visits + SF teacher blend, no repetition penalty
 #   - Behavior policy: keeps anti-repetition penalty for exploration
 #   - mcts_value_mix=0.25: target = 75% game outcome + 25% MCTS value
+#   - moves-left head: dodatkowy sygnal przeciw shufflingowi i dla szybszej konwersji
+#   - sharp replay sampling: czesc batcha z pozycji bardziej decyzyjnych
 #
 # INCOMPATIBLE with v1/v2 models.  Clean start required.
 #
@@ -79,13 +81,14 @@ exec timeout 4h python -m mini_az --mode train \
     --buffer 500000 \
     --recent_frac 0.75 \
     --recent_window 200000 \
-    --max_plies 150 \
+    --max_plies 220 \
     --resign_threshold -0.95 \
     --resign_patience 10 \
     --sf_path /usr/games/stockfish \
     --sf_elo 2000 \
     --sf_eval_elo 1320 \
     --sf_eval_elo_easy 0 \
+    --sf_eval_max_plies 220 \
     --sf_boot_prob 1.0 \
     --sf_boot_time_ms 0 \
     --sf_boot_depth 8 \
@@ -100,9 +103,12 @@ exec timeout 4h python -m mini_az --mode train \
     --sf_teacher_cp_soft_scale 150.0 \
     --sf_teacher_eps 0.02 \
     --mcts_value_mix 0.25 \
+    --moves_left_w 0.15 \
     --mix_best 0.25 \
     --mix_opp 0.15 \
     --opp_lag 5 \
+    --sharp_frac 0.20 \
+    --sharp_threshold 0.35 \
     --eval_every 5 \
     --eval_games 10 \
     --eval_sims 400 \

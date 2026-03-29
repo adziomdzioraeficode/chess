@@ -25,6 +25,12 @@ class Sample:
     target_pi: np.ndarray
     z: float
     wdl: np.ndarray  # [P(win), P(draw), P(loss)] target — 3 floats
+    plies_left: float = 0.0
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if "plies_left" not in self.__dict__:
+            self.plies_left = 0.0
 
 
 class ReplayBuffer:
@@ -90,21 +96,61 @@ class ReplayBuffer:
         idxs = (newest - offs) % self.maxlen
         return idxs.astype(np.int64)
 
-    def sample_batch_mixed(self, batch_size: int, recent_frac: float = 0.5, recent_window: int = 200_000) -> list[Sample]:
+    def _sample_indices_sharp(self, n: int, threshold: float) -> np.ndarray:
+        if n <= 0 or len(self.data) == 0:
+            return np.array([], dtype=np.int64)
+        found: list[int] = []
+        tries_left = max(64, 16 * n)
+        size = len(self.data)
+
+        while len(found) < n and tries_left > 0:
+            idx = int(np.random.randint(0, size))
+            if abs(float(getattr(self.data[idx], "z", 0.0))) >= threshold:
+                found.append(idx)
+            tries_left -= 1
+
+        if not found:
+            return np.array([], dtype=np.int64)
+        if len(found) < n:
+            extra = np.random.choice(np.asarray(found, dtype=np.int64), size=n - len(found), replace=True)
+            return np.concatenate([np.asarray(found, dtype=np.int64), extra])
+        return np.asarray(found, dtype=np.int64)
+
+    def sample_batch_mixed(
+        self,
+        batch_size: int,
+        recent_frac: float = 0.5,
+        recent_window: int = 200_000,
+        sharp_frac: float = 0.0,
+        sharp_threshold: float = 0.35,
+    ) -> list[Sample]:
         size = len(self.data)
         if size == 0:
             return []
 
         recent_frac = float(np.clip(recent_frac, 0.0, 1.0))
-        n_recent = int(round(batch_size * recent_frac))
-        n_all = batch_size - n_recent
+        sharp_frac = float(np.clip(sharp_frac, 0.0, 1.0))
+
+        n_sharp = int(round(batch_size * sharp_frac))
+        n_remaining = batch_size - n_sharp
+        n_recent = int(round(n_remaining * recent_frac))
+        n_all = n_remaining - n_recent
 
         idxs = []
+        if n_sharp > 0:
+            sharp_idxs = self._sample_indices_sharp(n_sharp, sharp_threshold)
+            idxs.append(sharp_idxs)
+            n_missing = n_sharp - int(sharp_idxs.size)
+            if n_missing > 0:
+                n_recent += n_missing
         if n_recent > 0:
             idxs.append(self._sample_indices_recent(n_recent, recent_window))
         if n_all > 0:
             idxs.append(self._sample_indices_uniform(n_all))
 
+        idxs = [x for x in idxs if x.size > 0]
+        if not idxs:
+            return []
         idxs = np.concatenate(idxs) if len(idxs) > 1 else idxs[0]
         np.random.shuffle(idxs)
 
@@ -145,7 +191,7 @@ def flip_sample_lr(s: Sample) -> Sample:
     bp[PL_OPP_OO], bp[PL_OPP_OOO] = bp[PL_OPP_OOO].copy(), bp[PL_OPP_OO].copy()
     fs = (s.moves_fs ^ 7).copy()
     ts = (s.moves_ts ^ 7).copy()
-    return Sample(bp, fs, ts, s.moves_pr.copy(), s.target_pi.copy(), s.z, s.wdl.copy())
+    return Sample(bp, fs, ts, s.moves_pr.copy(), s.target_pi.copy(), s.z, s.wdl.copy(), s.plies_left)
 
 
 def collate(samples: List[Sample], device: str):
@@ -167,6 +213,7 @@ def collate(samples: List[Sample], device: str):
     target_pi = torch.zeros((B, Lmax), dtype=torch.float32, device=device)
     z = torch.tensor([s.z for s in samples], dtype=torch.float32, device=device)
     wdl = torch.tensor(np.stack([s.wdl for s in samples]), dtype=torch.float32, device=device)  # (B, 3)
+    plies_left = torch.tensor([float(getattr(s, "plies_left", 0.0)) for s in samples], dtype=torch.float32, device=device)
 
     for i, s in enumerate(samples):
         L = s.moves_fs.shape[0]
@@ -176,7 +223,7 @@ def collate(samples: List[Sample], device: str):
         mask[i, :L] = True
         target_pi[i, :L] = torch.tensor(s.target_pi, dtype=torch.float32, device=device)
 
-    return boards, fs, ts, pr, mask, target_pi, z, wdl
+    return boards, fs, ts, pr, mask, target_pi, z, wdl, plies_left
 
 
 def masked_entropy(p: torch.Tensor, mask: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
@@ -185,9 +232,9 @@ def masked_entropy(p: torch.Tensor, mask: torch.Tensor, eps: float = 1e-12) -> t
     return ent.mean()
 
 
-def train_step(net, opt, batch, val_w=2.0):
-    boards, fs, ts, pr, mask, target_pi, z, wdl_target = batch
-    logits, wdl_logits = net.forward_policy_value(boards, fs, ts, pr, mask)
+def train_step(net, opt, batch, val_w=2.0, moves_left_w: float = 0.15):
+    boards, fs, ts, pr, mask, target_pi, z, wdl_target, plies_left_target = batch
+    logits, wdl_logits, moves_left_pred = net.forward_policy_value(boards, fs, ts, pr, mask)
 
     logp = F.log_softmax(logits, dim=-1)
     pol_loss = -(target_pi * logp).masked_fill(~mask, 0.0).sum(dim=-1).mean()
@@ -195,8 +242,9 @@ def train_step(net, opt, batch, val_w=2.0):
     # WDL cross-entropy loss (replaces Huber on scalar z)
     wdl_logp = F.log_softmax(wdl_logits, dim=-1)  # (B, 3)
     val_loss = -(wdl_target * wdl_logp).sum(dim=-1).mean()
+    ml_loss = F.smooth_l1_loss(moves_left_pred, plies_left_target)
 
-    loss = pol_loss + val_w * val_loss
+    loss = pol_loss + val_w * val_loss + float(moves_left_w) * ml_loss
 
     opt.zero_grad()
     loss.backward()
@@ -212,6 +260,8 @@ def train_step(net, opt, batch, val_w=2.0):
         v = wdl_probs[:, 0] - wdl_probs[:, 2]  # win - loss
         v_mean = float(v.mean().item())
         z_mean = float(z.mean().item())
+        ml_mean = float(moves_left_pred.mean().item())
+        ml_tgt_mean = float(plies_left_target.mean().item())
 
         if v.numel() > 2:
             vv = v.detach().float()
@@ -230,10 +280,13 @@ def train_step(net, opt, batch, val_w=2.0):
         "loss": float(loss.item()),
         "pol": float(pol_loss.item()),
         "val": float(val_loss.item()),
+        "ml": float(ml_loss.item()),
         "grad_norm": grad_norm,
         "pred_ent": pred_ent,
         "tgt_ent": tgt_ent,
         "v_mean": v_mean,
         "z_mean": z_mean,
         "vz_corr": vz_corr,
+        "ml_mean": ml_mean,
+        "ml_tgt_mean": ml_tgt_mean,
     }
