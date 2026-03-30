@@ -61,7 +61,8 @@ fi
 mkdir -p models
 
 # 4h hard timeout — ensures VM cost stays bounded
-exec timeout 4h python -m mini_az --mode train \
+export PYTHONUNBUFFERED=1
+exec timeout 4h python -u -m mini_az --mode train \
     --clear_buffer \
     --resume_opt \
     --workers 92 \
