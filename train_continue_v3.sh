@@ -64,7 +64,7 @@ mkdir -p models
 exec timeout 4h python -m mini_az --mode train \
     --clear_buffer \
     --resume_opt \
-    --workers 80 \
+    --workers 92 \
     --mp_sims 200 \
     --games_per_iter 60 \
     --iters 9999 \
