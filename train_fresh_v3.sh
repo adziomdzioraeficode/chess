@@ -74,7 +74,8 @@ echo "Done. Starting v3 training from scratch."
 mkdir -p models
 
 # 4h hard timeout — ensures VM cost stays bounded
-exec timeout 4h python -m mini_az --mode train \
+export PYTHONUNBUFFERED=1
+exec timeout 4h python -u -m mini_az --mode train \
     --clear_buffer \
     --workers 92 \
     --mp_sims 200 \
