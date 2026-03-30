@@ -58,12 +58,19 @@ def bench_single_core():
             net.encode_board(t)
     fwd_ms = (time.perf_counter() - t0) / n_fwd * 1000
 
-    # MCTS search (64 sims — same as selfplay)
+    # MCTS search (64 sims — old selfplay)
     n_mcts = 10
     t0 = time.perf_counter()
     for _ in range(n_mcts):
         mcts_search(net, b, "cpu", sims=64, history=[])
     mcts_ms = (time.perf_counter() - t0) / n_mcts * 1000
+
+    # MCTS search (200 sims — new selfplay)
+    n_200 = 5
+    t0 = time.perf_counter()
+    for _ in range(n_200):
+        mcts_search(net, b, "cpu", sims=200, history=[])
+    mcts_200_ms = (time.perf_counter() - t0) / n_200 * 1000
 
     # MCTS search (400 sims — eval)
     n_eval = 3
@@ -76,6 +83,7 @@ def bench_single_core():
         "params": params,
         "fwd_ms": fwd_ms,
         "mcts_64_ms": mcts_ms,
+        "mcts_200_ms": mcts_200_ms,
         "mcts_400_ms": eval_ms,
     }
 
@@ -269,12 +277,13 @@ def main():
     print(f"  Parameters:       {sc['params']:,}")
     print(f"  Forward pass:     {sc['fwd_ms']:.1f} ms")
     print(f"  MCTS  64 sims:    {sc['mcts_64_ms']:.0f} ms")
+    print(f"  MCTS 200 sims:    {sc['mcts_200_ms']:.0f} ms")
     print(f"  MCTS 400 sims:    {sc['mcts_400_ms']:.0f} ms")
     print()
 
     # --- 2. Parallel MCTS ---
     print("=" * 60)
-    print("2. PARALLEL MCTS THROUGHPUT (64 sims/search)")
+    print("2. PARALLEL MCTS THROUGHPUT (200 sims/search)")
     print("=" * 60)
 
     # Scale worker counts to machine
@@ -286,7 +295,7 @@ def main():
     else:
         worker_counts = [1, 2, 4, max(4, ncpu - 1), ncpu]
 
-    par = bench_parallel(worker_counts, sims=64, games_per_worker=6)
+    par = bench_parallel(worker_counts, sims=200, games_per_worker=3)
     print(f"  {'Workers':>7} {'Throughput':>12} {'Avg ms':>8} {'Max ms':>8} "
           f"{'Slowdown':>9} {'Wall s':>7}")
     best_nw = 0
@@ -352,20 +361,20 @@ def main():
     # But with SF teacher overhead (50% prob), add ~30 SF calls
     avg_game_plies = 70  # typical game length
     avg_searches_per_game = avg_game_plies  # 1 search per ply
-    single_game_time_s = avg_searches_per_game * sc["mcts_64_ms"] / 1000
+    single_game_time_s = avg_searches_per_game * sc["mcts_200_ms"] / 1000
 
     if "error" not in sf:
         sf_overhead_s = avg_searches_per_game * 0.8 * sf["depth_14_ms"] / 1000  # 80% teacher prob
         single_game_time_s += sf_overhead_s
 
-    games_per_iter = 120
+    games_per_iter = 60
     if best_tp > 0:
         # Wall time for selfplay = games_per_iter * searches_per_game / throughput
         sp_wall_s = games_per_iter * avg_searches_per_game / best_tp
     else:
         sp_wall_s = float("inf")
 
-    train_steps = 100
+    train_steps = 200
     if best_sps > 0:
         train_wall_s = train_steps / best_sps
     else:
