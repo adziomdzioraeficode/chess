@@ -85,17 +85,17 @@ exec timeout 3h python -u -m mini_az --mode train \
     --clear_buffer \
     --workers 92 \
     --mp_sims 128 \
-    --games_per_iter 80 \
+    --games_per_iter 60 \
     --iters 9999 \
-    --steps_per_iter 200 \
+    --steps_per_iter 250 \
     --batch 512 \
     --lr 3e-4 \
     --buffer 500000 \
     --recent_frac 0.70 \
     --recent_window 200000 \
-    --max_plies 160 \
-    --resign_threshold -0.95 \
-    --resign_patience 8 \
+    --max_plies 120 \
+    --resign_threshold -0.90 \
+    --resign_patience 6 \
     --sf_path /usr/games/stockfish \
     --sf_elo 2000 \
     --sf_eval_elo 1320 \
@@ -104,7 +104,7 @@ exec timeout 3h python -u -m mini_az --mode train \
     --sf_worker_frac 0.70 \
     --sf_boot_prob 1.0 \
     --sf_boot_time_ms 0 \
-    --sf_boot_depth 12 \
+    --sf_boot_depth 8 \
     --sf_cp_scale 600.0 \
     --sf_cp_cap 1000 \
     --sf_teacher_prob 0.60 \
