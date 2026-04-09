@@ -31,10 +31,8 @@ class MiniAzPlayer:
     def __init__(self, model_path: str, sims: int = 200, device: str = "cpu"):
         self.net = ChessNet()
         ckpt = torch.load(model_path, map_location=device, weights_only=False)
-        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-            self.net.load_state_dict(ckpt["model_state_dict"])
-        elif isinstance(ckpt, dict) and all(k.startswith(("conv", "res", "pol", "val", "ml")) for k in list(ckpt.keys())[:5]):
-            self.net.load_state_dict(ckpt)
+        if isinstance(ckpt, dict) and "model" in ckpt:
+            self.net.load_state_dict(ckpt["model"])
         else:
             self.net.load_state_dict(ckpt)
         self.net.eval()
@@ -138,7 +136,7 @@ def main():
     parser.add_argument("--maia-nodes", type=int, default=1)
     parser.add_argument("--bg1-path", default="lc0_nets/bad-gyal-1.pb.gz")
     parser.add_argument("--bg1-nodes", type=int, default=1)
-    parser.add_argument("--model-path", default="models/best.pt")
+    parser.add_argument("--model-path", default="mini_az.pt")
     parser.add_argument("--model-sims", type=int, default=200, help="MCTS sims for our model")
     parser.add_argument("--sf-path", default="/usr/games/stockfish")
     parser.add_argument("--sf-elo", type=int, default=1320, help="SF limited Elo")
