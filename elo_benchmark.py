@@ -120,6 +120,8 @@ def main():
     parser.add_argument("--time-ms", type=int, default=200, help="Time per move for UCI engines (ms)")
     parser.add_argument("--maia-path", default="lc0_nets/maia-1100.pb.gz")
     parser.add_argument("--maia-nodes", type=int, default=1)
+    parser.add_argument("--bg1-path", default="lc0_nets/bad-gyal-1.pb.gz")
+    parser.add_argument("--bg1-nodes", type=int, default=1)
     parser.add_argument("--model-path", default="models/best.pt")
     parser.add_argument("--model-sims", type=int, default=200, help="MCTS sims for our model")
     parser.add_argument("--sf-path", default="/usr/games/stockfish")
@@ -142,6 +144,13 @@ def main():
     maia = chess.engine.SimpleEngine.popen_uci(
         ["lc0", f"--weights={args.maia_path}", "--threads=1", "--verbose-move-stats=false"]
     )
+
+    bg1 = None
+    if args.bg1_path and os.path.isfile(args.bg1_path):
+        print(f"Loading Bad Gyal 1: {args.bg1_path} (nodes={args.bg1_nodes})")
+        bg1 = chess.engine.SimpleEngine.popen_uci(
+            ["lc0", f"--weights={args.bg1_path}", "--threads=1", "--verbose-move-stats=false"]
+        )
 
     sf_label = f"SF-{args.sf_elo}"
     if not args.skip_sf:
@@ -183,6 +192,17 @@ def main():
     print(f"\nmini_az vs Maia-1100: +{r['w']}-{r['l']}={r['d']} "
           f"score={r['score']:.3f} Elo={elo_diff(r['score']):+.0f} ({time.time()-t0:.0f}s)")
 
+    if bg1 is not None:
+        print(f"\n{'='*60}")
+        print(f"MATCH 4: mini_az vs Bad Gyal 1 ({args.games} games)")
+        print(f"{'='*60}")
+        t0 = time.time()
+        r = play_match(mini, bg1, "mini_az", "BG1",
+                        games=args.games, time_limit_ms=args.time_ms, max_plies=args.max_plies)
+        results[("mini_az", "BG1")] = r
+        print(f"\nmini_az vs BG1: +{r['w']}-{r['l']}={r['d']} "
+              f"score={r['score']:.3f} Elo={elo_diff(r['score']):+.0f} ({time.time()-t0:.0f}s)")
+
     # --- Summary ---
     print(f"\n{'='*60}")
     print("SUMMARY & ELO ESTIMATES")
@@ -212,6 +232,8 @@ def main():
               f"score={r['score']:.3f} Elo diff={elo_diff(r['score']):+.0f}")
 
     maia.quit()
+    if bg1 is not None:
+        bg1.quit()
     if not args.skip_sf:
         sf.quit()
 
