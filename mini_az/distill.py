@@ -9,6 +9,7 @@ import os
 import random
 import time
 import traceback
+import warnings
 import multiprocessing as mp
 
 import numpy as np
@@ -332,9 +333,11 @@ def run_distillation(
     cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=max(1, cosine_steps), eta_min=lr * 0.01
     )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup]
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*epoch parameter.*deprecated.*")
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup]
+        )
     print(f"LR: warmup {warmup} steps, cosine {cosine_steps}, total {total_steps}")
 
     global_step = 0
@@ -350,7 +353,9 @@ def run_distillation(
             batch_s = rb.sample_batch(batch_size)
             batch = collate(batch_s, device)
             m = train_step(net, opt, batch, val_w=val_w, moves_left_w=moves_left_w)
-            scheduler.step()
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*epoch parameter.*deprecated.*")
+                scheduler.step()
             global_step += 1
             epoch_steps += 1
 

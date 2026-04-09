@@ -8,6 +8,7 @@ import queue
 import shutil
 import sys
 import time
+import warnings
 import multiprocessing as mp
 from multiprocessing.process import BaseProcess
 from datetime import datetime, timezone
@@ -370,9 +371,11 @@ def _run_train(args, net, device, best_path):
     cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=max(1, cosine_steps), eta_min=args.lr * 0.01
     )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_steps]
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*epoch parameter.*deprecated.*")
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_steps]
+        )
     print(f"LR schedule: warmup {warmup_steps} steps → cosine {cosine_steps} steps "
           f"(base={args.lr} eta_min={args.lr*0.01:.2e} total={total_steps})")
 
@@ -537,7 +540,9 @@ def _run_train(args, net, device, best_path):
                 )
                 batch = collate(batch_s, device)
                 m = train_step(net, opt, batch, val_w=args.val_w, moves_left_w=args.moves_left_w)
-                scheduler.step()
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=".*epoch parameter.*deprecated.*")
+                    scheduler.step()
                 last_m = m
                 is_log_step = ((step + 1) % max(1, args.steps_per_iter // 5) == 0) or (step + 1 == args.steps_per_iter)
                 if is_log_step:
