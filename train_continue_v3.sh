@@ -66,31 +66,31 @@ exec timeout 4h python -u -m mini_az --mode train \
     --clear_buffer \
     --resume_opt \
     --workers 92 \
-    --mp_sims 200 \
-    --games_per_iter 60 \
+    --mp_sims 128 \
+    --games_per_iter 80 \
     --iters 9999 \
     --steps_per_iter 200 \
     --batch 512 \
-    --lr 5e-4 \
+    --lr 3e-4 \
     --buffer 500000 \
     --recent_frac 0.70 \
     --recent_window 200000 \
     --max_plies 160 \
     --resign_threshold -0.95 \
-    --resign_patience 10 \
+    --resign_patience 8 \
     --sf_path /usr/games/stockfish \
     --sf_elo 2000 \
     --sf_eval_elo 1320 \
     --sf_eval_elo_easy 0 \
     --sf_eval_max_plies 200 \
-    --sf_worker_frac 0.75 \
+    --sf_worker_frac 0.70 \
     --sf_boot_prob 1.0 \
     --sf_boot_time_ms 0 \
     --sf_boot_depth 12 \
     --sf_cp_scale 600.0 \
     --sf_cp_cap 1000 \
-    --sf_teacher_prob 0.80 \
-    --sf_teacher_mix 0.50 \
+    --sf_teacher_prob 0.60 \
+    --sf_teacher_mix 0.35 \
     --sf_teacher_time_ms 0 \
     --sf_teacher_depth 8 \
     --sf_teacher_multipv 5 \

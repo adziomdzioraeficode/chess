@@ -32,13 +32,25 @@ from .selfplay import (
 from .eval_play import (
     play_vs_stockfish, play_vs_random, play_vs_model, uci_loop,
 )
+from .distill import run_distillation
 
 
 def main():
     torch.set_num_threads(8)
     torch.set_num_interop_threads(2)
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["train", "eval", "uci"], required=True)
+    ap.add_argument("--mode", choices=["train", "eval", "uci", "distill"], required=True)
+    # Distillation-specific args
+    ap.add_argument("--distill_samples", type=int, default=500_000,
+                    help="Target number of SF-labeled positions for distillation")
+    ap.add_argument("--distill_epochs", type=int, default=3)
+    ap.add_argument("--distill_eval_depth", type=int, default=12,
+                    help="SF depth for value evaluation in distillation")
+    ap.add_argument("--distill_policy_depth", type=int, default=10,
+                    help="SF depth for policy (multipv) in distillation")
+    ap.add_argument("--distill_multipv", type=int, default=8)
+    ap.add_argument("--distill_positions_per_game", type=int, default=10)
+    ap.add_argument("--distill_max_random_plies", type=int, default=120)
     ap.add_argument("--resume_opt", action="store_true", help="Also resume optimizer state")
     ap.add_argument("--max_plies", type=int, default=200)
     ap.add_argument("--eval_every", type=int, default=10)
@@ -171,6 +183,27 @@ def main():
 
     if args.mode == "train":
         _run_train(args, net, device, best_path)
+    elif args.mode == "distill":
+        run_distillation(
+            net, device,
+            sf_path=args.sf_path,
+            sf_elo=args.sf_elo,
+            workers=args.workers if args.workers > 0 else 80,
+            target_samples=args.distill_samples,
+            batch_size=args.batch,
+            lr=args.lr,
+            epochs=args.distill_epochs,
+            sf_eval_depth=args.distill_eval_depth,
+            sf_policy_depth=args.distill_policy_depth,
+            sf_multipv=args.distill_multipv,
+            sf_cp_scale=args.sf_cp_scale,
+            sf_cp_cap=args.sf_cp_cap,
+            positions_per_game=args.distill_positions_per_game,
+            max_random_plies=args.distill_max_random_plies,
+            val_w=args.val_w,
+            moves_left_w=args.moves_left_w,
+            save_path=args.model,
+        )
     elif args.mode == "eval":
         net.eval()
         score, winrate, elo_diff = play_vs_stockfish(
