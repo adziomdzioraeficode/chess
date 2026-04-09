@@ -122,16 +122,16 @@ exec timeout 3h python -u -m mini_az --mode train \
     --opp_lag 5 \
     --sharp_frac 0.20 \
     --sharp_threshold 0.35 \
-    --eval_every 5 \
+    --eval_every 10 \
     --eval_games 10 \
-    --eval_sims 400 \
+    --eval_sims 200 \
     --sf_movetime_ms 10 \
-    --rand_eval_games 20 \
-    --rand_eval_sims 200 \
-    --rand_max_plies 150 \
-    --self_eval_games 12 \
-    --self_eval_sims 64 \
-    --self_eval_max_plies 150 \
+    --rand_eval_games 10 \
+    --rand_eval_sims 32 \
+    --rand_max_plies 120 \
+    --self_eval_games 6 \
+    --self_eval_sims 32 \
+    --self_eval_max_plies 120 \
     --save_every 5 \
     --val_w 2.0 \
     --gate_margin 0.005 \
