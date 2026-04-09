@@ -314,7 +314,9 @@ def run_distillation(
         print("Too few samples, aborting distillation")
         return
 
-    # Phase 2: Train supervised
+    # Phase 2: Train supervised — use multiple threads for forward/backward
+    n_threads = min(32, max(8, os.cpu_count() or 8))
+    torch.set_num_threads(n_threads)
     print(f"\n=== TRAINING PHASE: {epochs} epochs, batch={batch_size} ===")
     net.train()
     opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
