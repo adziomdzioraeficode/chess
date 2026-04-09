@@ -46,6 +46,16 @@ class MiniAzPlayer:
         return pick_move_uci(board, visits, temperature=1e-6)
 
 
+class UciPlayer:
+    """Wrapper for UCI engines with a fixed Limit."""
+    def __init__(self, engine: chess.engine.SimpleEngine, limit: chess.engine.Limit):
+        self.engine = engine
+        self.limit = limit
+
+    def quit(self):
+        self.engine.quit()
+
+
 def play_match(
     player_a,
     player_b,
@@ -58,8 +68,8 @@ def play_match(
     W = D = L = 0
 
     def get_move(player, board, history):
-        if isinstance(player, chess.engine.SimpleEngine):
-            r = player.play(board, chess.engine.Limit(time=time_limit_ms / 1000.0))
+        if isinstance(player, UciPlayer):
+            r = player.engine.play(board, player.limit)
             return r.move
         elif isinstance(player, MiniAzPlayer):
             return player.pick_move(board, history)
@@ -141,22 +151,25 @@ def main():
     mini = MiniAzPlayer(args.model_path, sims=args.model_sims)
 
     print(f"Loading Maia-1100: {args.maia_path} (nodes={args.maia_nodes})")
-    maia = chess.engine.SimpleEngine.popen_uci(
+    maia_engine = chess.engine.SimpleEngine.popen_uci(
         ["lc0", f"--weights={args.maia_path}", "--threads=1", "--verbose-move-stats=false"]
     )
+    maia = UciPlayer(maia_engine, chess.engine.Limit(nodes=args.maia_nodes))
 
     bg1 = None
     if args.bg1_path and os.path.isfile(args.bg1_path):
         print(f"Loading Bad Gyal 1: {args.bg1_path} (nodes={args.bg1_nodes})")
-        bg1 = chess.engine.SimpleEngine.popen_uci(
+        bg1_engine = chess.engine.SimpleEngine.popen_uci(
             ["lc0", f"--weights={args.bg1_path}", "--threads=1", "--verbose-move-stats=false"]
         )
+        bg1 = UciPlayer(bg1_engine, chess.engine.Limit(nodes=args.bg1_nodes))
 
     sf_label = f"SF-{args.sf_elo}"
     if not args.skip_sf:
         print(f"Loading Stockfish: {args.sf_path} (elo={args.sf_elo})")
-        sf = chess.engine.SimpleEngine.popen_uci(args.sf_path)
-        sf.configure({"Threads": 1, "Hash": 16, "UCI_LimitStrength": True, "UCI_Elo": args.sf_elo})
+        sf_engine = chess.engine.SimpleEngine.popen_uci(args.sf_path)
+        sf_engine.configure({"Threads": 1, "Hash": 16, "UCI_LimitStrength": True, "UCI_Elo": args.sf_elo})
+        sf = UciPlayer(sf_engine, chess.engine.Limit(time=args.time_ms / 1000.0))
 
     results = {}
 
