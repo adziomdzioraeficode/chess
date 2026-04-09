@@ -30,7 +30,13 @@ class MiniAzPlayer:
     """Wrapper for our network + MCTS."""
     def __init__(self, model_path: str, sims: int = 200, device: str = "cpu"):
         self.net = ChessNet()
-        self.net.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+        ckpt = torch.load(model_path, map_location=device, weights_only=False)
+        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+            self.net.load_state_dict(ckpt["model_state_dict"])
+        elif isinstance(ckpt, dict) and all(k.startswith(("conv", "res", "pol", "val", "ml")) for k in list(ckpt.keys())[:5]):
+            self.net.load_state_dict(ckpt)
+        else:
+            self.net.load_state_dict(ckpt)
         self.net.eval()
         self.device = device
         self.sims = sims
