@@ -78,7 +78,7 @@ exec timeout 4h python -u -m mini_az --mode train \
     --recent_window 200000 \
     --max_plies 160 \
     --resign_threshold -0.95 \
-    --resign_patience 8 \
+    --resign_patience 10 \
     --sf_path /usr/games/stockfish \
     --sf_elo 2000 \
     --sf_eval_elo 1320 \
