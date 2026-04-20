@@ -84,19 +84,19 @@ rm -f train_log.csv eval_log.csv
 exec timeout 3h python -u -m mini_az --mode train \
     --clear_buffer \
     --workers 68 \
-    --mp_sims 128 \
+    --mp_sims 200 \
     --mp_leaf_batch 16 \
     --games_per_iter 60 \
     --iters 9999 \
-    --steps_per_iter 250 \
+    --steps_per_iter 200 \
     --batch 512 \
     --lr 3e-4 \
     --buffer 500000 \
     --recent_frac 0.70 \
     --recent_window 200000 \
-    --max_plies 120 \
-    --resign_threshold -0.90 \
-    --resign_patience 6 \
+    --max_plies 160 \
+    --resign_threshold -0.95 \
+    --resign_patience 10 \
     --sf_path /usr/games/stockfish \
     --sf_elo 2000 \
     --sf_eval_elo 1320 \
@@ -105,7 +105,7 @@ exec timeout 3h python -u -m mini_az --mode train \
     --sf_worker_frac 0.70 \
     --sf_boot_prob 1.0 \
     --sf_boot_time_ms 0 \
-    --sf_boot_depth 8 \
+    --sf_boot_depth 12 \
     --sf_cp_scale 600.0 \
     --sf_cp_cap 1000 \
     --sf_teacher_prob 0.60 \
@@ -123,12 +123,12 @@ exec timeout 3h python -u -m mini_az --mode train \
     --opp_lag 5 \
     --sharp_frac 0.20 \
     --sharp_threshold 0.35 \
-    --eval_every 10 \
+    --eval_every 5 \
     --eval_games 10 \
-    --eval_sims 200 \
+    --eval_sims 400 \
     --sf_movetime_ms 10 \
-    --rand_eval_games 10 \
-    --rand_eval_sims 32 \
+    --rand_eval_games 6 \
+    --rand_eval_sims 64 \
     --rand_max_plies 120 \
     --self_eval_games 6 \
     --self_eval_sims 32 \
