@@ -21,19 +21,20 @@
 #
 # INCOMPATIBLE with v1/v2 models.  Clean start required.
 #
-# Target: Azure Standard_Ds96_v6 (48 physical / 96 HT cores, AMD EPYC 9004)
+# Target: Azure Standard_D96s_v6 (48 physical / 96 HT cores, Intel Xeon 8573C)
 # Time budget: 4 hours (14400s)
 # Goal: beat Stockfish 1320 Elo (like lc0 early nets but as a home RL project)
 #
-# Tuning rationale (4h on Ds96v6):
-#   - Network 2x bigger (5.5M vs 3.3M) → inference ~1.7x slower per search
-#   - 80 workers optimal on Ds96v6 (bench: 60 searches/s at 32 sims)
-#   - Training uses 32 threads during pause (bench: ~5 steps/s@batch512)
-#   - SF teacher depth-8 multipv-5: ~50ms/call, 80% prob → ~40% effective blend
-#   - mp_sims=32: 2x more games/iter vs 64 sims — faster iteration, key early on
-#   - steps_per_iter=200: more gradient steps to utilise the extra games
-#   - Expected iter time: ~80s selfplay + ~40s train = ~120s/iter
-#   - 4h ≈ ~120 iters (hard timeout enforced)
+# Tuning rationale (4h on D96s_v6 — bench_stages.py results):
+#   - Intel Xeon 8573C: avx512_bf16 + amx_bf16 present, but PyTorch bf16
+#     autocast on CPU is a REGRESSION (0.73x) for this small model → bf16 OFF
+#   - Leaf batching K=16: 2.40x single-core speedup (vs K=1)
+#   - 68 workers + 24 trainer threads = 92 used / 96 available (4 for orchestrator)
+#   - Training: 24 threads @ batch 512 → 4.3 steps/s → 200 steps in ~47s
+#   - SF teacher depth-8 multipv-5: ~11ms/call, 80% prob
+#   - Async trainer (Etap 3.1): selfplay & training run in parallel
+#   - Expected async iter time: ~122s (selfplay-bound)
+#   - 4h ≈ ~118 iters (hard timeout enforced)
 #
 # Strategy (compressed for 4h):
 #   - Phase 1 (iter 1-20):  Heavy SF distillation, random init → basic piece values
@@ -77,10 +78,9 @@ mkdir -p models
 export PYTHONUNBUFFERED=1
 exec timeout 4h python -u -m mini_az --mode train \
     --clear_buffer \
-    --workers 92 \
+    --workers 68 \
     --mp_sims 200 \
-    --mp_leaf_batch 8 \
-    --bf16_inference \
+    --mp_leaf_batch 16 \
     --games_per_iter 60 \
     --iters 9999 \
     --steps_per_iter 200 \

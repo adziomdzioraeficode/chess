@@ -8,7 +8,7 @@ Tests:
   3. Training step throughput at various thread counts
   4. Stockfish teacher latency (if available)
 
-Architecture: 10×96 SE-ResNet, 45 input planes, WDL head, ~5.5M params.
+Architecture: 10x96 SE-ResNet, 45 input planes, WDL head, ~5.5M params.
 Target: Azure Standard_D96s_v6 = 48 physical / 96 HT cores (AMD EPYC).
 """
 
@@ -271,7 +271,7 @@ def main():
 
     # --- 1. Single-core ---
     print("=" * 60)
-    print("1. SINGLE-CORE LATENCY (v3: 10×96, 45 planes, ~5.5M params)")
+    print("1. SINGLE-CORE LATENCY (v3: 10x96, 45 planes, ~5.5M params)")
     print("=" * 60)
     sc = bench_single_core()
     print(f"  Parameters:       {sc['params']:,}")
@@ -315,7 +315,7 @@ def main():
 
     # --- 3. Training throughput ---
     print("=" * 60)
-    print("3. TRAINING THROUGHPUT (batch=512, 10×96 net)")
+    print("3. TRAINING THROUGHPUT (batch=512, 10x96 net)")
     print("=" * 60)
 
     if ncpu >= 90:
@@ -357,7 +357,7 @@ def main():
     print("RECOMMENDATIONS FOR train_fresh_v3.sh")
     print("=" * 60)
 
-    # Estimate: each selfplay game ≈ 60 MCTS searches × mcts_64_ms (from root)
+    # Estimate: each selfplay game ≈ 60 MCTS searches x mcts_64_ms (from root)
     # But with SF teacher overhead (50% prob), add ~30 SF calls
     avg_game_plies = 70  # typical game length
     avg_searches_per_game = avg_game_plies  # 1 search per ply

@@ -2,7 +2,7 @@
 
 Generates positions by playing random/semi-random games, evaluates them with
 Stockfish (depth search for value, multipv for policy), and creates training
-samples directly. ~100-1000× faster than RL/MCTS for bootstrapping a network.
+samples directly. ~100-1000x faster than RL/MCTS for bootstrapping a network.
 """
 
 import os

@@ -65,10 +65,9 @@ export PYTHONUNBUFFERED=1
 exec timeout 4h python -u -m mini_az --mode train \
     --clear_buffer \
     --resume_opt \
-    --workers 92 \
+    --workers 68 \
     --mp_sims 128 \
-    --mp_leaf_batch 8 \
-    --bf16_inference \
+    --mp_leaf_batch 16 \
     --games_per_iter 80 \
     --iters 9999 \
     --steps_per_iter 200 \

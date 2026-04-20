@@ -149,7 +149,7 @@ class ChessNet(nn.Module):
 
         # Fill padded (B, Lmax) buffers in numpy — one allocation per tensor,
         # one torch.from_numpy per tensor. Previously this used torch.tensor()
-        # per row (~4 kernel launches × B), which dominated for small B.
+        # per row (~4 kernel launches x B), which dominated for small B.
         fs_np = np.zeros((B, Lmax), dtype=np.int64)
         ts_np = np.zeros((B, Lmax), dtype=np.int64)
         pr_np = np.zeros((B, Lmax), dtype=np.int64)

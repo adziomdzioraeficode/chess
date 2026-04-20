@@ -39,7 +39,7 @@ echo "PHASE 1: Supervised Distillation from SF"
 echo "=========================================="
 
 timeout 45m python -u -m mini_az --mode distill \
-    --workers 90 \
+    --workers 68 \
     --distill_samples 300000 \
     --distill_epochs 3 \
     --distill_eval_depth 12 \
@@ -83,10 +83,9 @@ rm -f train_log.csv eval_log.csv
 
 exec timeout 3h python -u -m mini_az --mode train \
     --clear_buffer \
-    --workers 92 \
+    --workers 68 \
     --mp_sims 128 \
-    --mp_leaf_batch 8 \
-    --bf16_inference \
+    --mp_leaf_batch 16 \
     --games_per_iter 60 \
     --iters 9999 \
     --steps_per_iter 250 \
