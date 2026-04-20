@@ -66,7 +66,7 @@ exec timeout 4h python -u -m mini_az --mode train \
     --clear_buffer \
     --resume_opt \
     --workers 68 \
-    --mp_sims 128 \
+    --mp_sims 200 \
     --mp_leaf_batch 16 \
     --games_per_iter 80 \
     --iters 9999 \
