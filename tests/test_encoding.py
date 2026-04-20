@@ -12,6 +12,7 @@ from mini_az.encoding import (
     PLANES_PER_POS,
     AUX_PLANES,
     HISTORY_STEPS,
+    PIECE_PLANES,
     PROMO_MAP,
     INV_PROMO_MAP,
     PL_MY_OO,
@@ -29,6 +30,24 @@ from mini_az.encoding import (
     legal_moves_canonical,
     append_eval_csv,
 )
+
+
+def _encode_pieces_legacy(planes, board, turn, plane_offset=0):
+    """Reference per-piece Python-loop encoder (pre-vectorization baseline)."""
+    for sq, piece in board.piece_map().items():
+        ptype = piece.piece_type
+        color = piece.color
+        if turn == chess.WHITE:
+            csq = sq
+            my = (color == chess.WHITE)
+        else:
+            csq = chess.square_mirror(sq)
+            my = (color == chess.BLACK)
+        r = chess.square_rank(csq)
+        f = chess.square_file(csq)
+        base = PIECE_PLANES[ptype]
+        idx = plane_offset + (base if my else base + 6)
+        planes[idx, r, f] = 1.0
 
 
 class TestConstants:
@@ -136,6 +155,85 @@ class TestBoardToTensor:
         board = chess.Board()
         t = board_to_tensor(board)
         assert t[PL_REPETITION].sum() == 0.0
+
+
+class TestEncodePiecesRegression:
+    """Vectorized _encode_pieces must be bit-identical to the legacy loop."""
+
+    def _random_positions(self, n: int, seed: int = 0xC0FFEE):
+        import random
+        rng = random.Random(seed)
+        boards = [chess.Board()]
+        while len(boards) < n:
+            b = boards[-1]
+            if b.is_game_over(claim_draw=False) or b.ply() > 120:
+                boards.append(chess.Board())
+                continue
+            legals = list(b.legal_moves)
+            if not legals:
+                boards.append(chess.Board())
+                continue
+            nb = b.copy()
+            nb.push(rng.choice(legals))
+            boards.append(nb)
+        return boards
+
+    def test_vectorized_matches_legacy_for_random_positions(self):
+        from mini_az.encoding import _encode_pieces  # vectorized
+        positions = self._random_positions(500)
+
+        for b in positions:
+            for turn in (chess.WHITE, chess.BLACK):
+                expected = np.zeros((INPUT_PLANES, 8, 8), dtype=np.float32)
+                actual = np.zeros((INPUT_PLANES, 8, 8), dtype=np.float32)
+
+                _encode_pieces_legacy(expected, b, turn, plane_offset=0)
+                _encode_pieces(actual, b, turn, plane_offset=0)
+
+                assert np.array_equal(expected, actual), (
+                    f"mismatch for fen={b.fen()!r} turn={turn}"
+                )
+
+    def test_vectorized_matches_legacy_with_offset(self):
+        from mini_az.encoding import _encode_pieces
+        positions = self._random_positions(50, seed=1234)
+
+        for b in positions:
+            for turn in (chess.WHITE, chess.BLACK):
+                for offset in (0, 12, 24):
+                    expected = np.zeros((INPUT_PLANES, 8, 8), dtype=np.float32)
+                    actual = np.zeros((INPUT_PLANES, 8, 8), dtype=np.float32)
+                    _encode_pieces_legacy(expected, b, turn, plane_offset=offset)
+                    _encode_pieces(actual, b, turn, plane_offset=offset)
+                    assert np.array_equal(expected, actual), (
+                        f"mismatch for fen={b.fen()!r} turn={turn} offset={offset}"
+                    )
+
+    def test_board_to_tensor_matches_legacy_full(self):
+        """End-to-end: board_to_tensor with history must be identical."""
+        from mini_az.encoding import _encode_pieces
+        positions = self._random_positions(200, seed=42)
+
+        for i, b in enumerate(positions):
+            hist = [positions[i - 1]] if i >= 1 else []
+            if i >= 2:
+                hist = [positions[i - 1], positions[i - 2]]
+            t_now = board_to_tensor(b, history=hist).numpy()
+
+            # Reconstruct expected using legacy encoder
+            expected = np.zeros((INPUT_PLANES, 8, 8), dtype=np.float32)
+            _encode_pieces_legacy(expected, b, b.turn, plane_offset=0)
+            for step in range(HISTORY_STEPS):
+                off = PLANES_PER_POS * (1 + step)
+                if step < len(hist):
+                    _encode_pieces_legacy(expected, hist[step], b.turn, plane_offset=off)
+
+            # Piece planes (0..35) must match exactly; aux planes come from board_to_tensor
+            # so we only compare the piece portion here.
+            assert np.array_equal(
+                t_now[: PLANES_PER_POS * (1 + HISTORY_STEPS)],
+                expected[: PLANES_PER_POS * (1 + HISTORY_STEPS)],
+            ), f"piece planes mismatch for fen={b.fen()!r}"
 
 
 class TestMoveEncoding:

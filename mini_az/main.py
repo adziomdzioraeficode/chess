@@ -29,6 +29,7 @@ from .stockfish import open_stockfish_engine
 from .selfplay import (
     make_game_samples_unified, selfplay_worker,
     broadcast_weights, broadcast_weights_initial, resolve_device,
+    default_weights_shm_path,
 )
 from .eval_play import (
     play_vs_stockfish, play_vs_random, play_vs_model, uci_loop,
@@ -380,20 +381,28 @@ def _run_train(args, net, device, best_path):
           f"(base={args.lr} eta_min={args.lr*0.01:.2e} total={total_steps})")
 
     ctx = mp.get_context("spawn")
-    weights_qs = [ctx.Queue(maxsize=1) for _ in range(args.workers)]
     out_q = ctx.Queue(maxsize=max(512, args.games_per_iter * 10))
     stop_ev = ctx.Event()
     procs: List[BaseProcess] = []
     pause_ev = ctx.Event()
 
+    # Shared-memory weights distribution: one file on tmpfs + a version counter
+    # workers poll. Replaces the previous pickle-into-Queue-per-worker broadcast.
+    weights_path = default_weights_shm_path()
+    weights_version = ctx.Value('q', 0)
+
     if args.workers > 0:
+        # Publish initial weights before spawning — workers wait for version>0.
+        broadcast_weights_initial(weights_path, net, weights_version)
+        print(f"Initial weights published to {weights_path} (version={weights_version.value})")
+
         sf_worker_frac = float(np.clip(args.sf_worker_frac, 0.0, 1.0))
         sf_enabled_workers = min(args.workers, max(0, int(round(args.workers * sf_worker_frac))))
         for wid in range(args.workers):
             enable_sf = (not args.no_sf) and (wid < sf_enabled_workers)
             sf_teacher_depth = None if int(args.sf_teacher_depth) <= 0 else int(args.sf_teacher_depth)
             p = ctx.Process(target=selfplay_worker,
-                            args=(wid, weights_qs[wid], out_q, stop_ev, pause_ev,
+                            args=(wid, weights_path, weights_version, out_q, stop_ev, pause_ev,
                                   args.mp_sims, args.max_plies,
                                   args.resign_threshold, args.resign_patience,
                                   args.best_model, args.mix_best, args.best_reload_sec,
@@ -413,7 +422,6 @@ def _run_train(args, net, device, best_path):
         time.sleep(1)
         print("Workers alive:", [p.is_alive() for p in procs])
         print(f"Stockfish-enabled workers: {sf_enabled_workers}/{args.workers} (frac={sf_worker_frac:.2f})")
-        broadcast_weights_initial(weights_qs, net)
         print(f"Started {args.workers} self-play workers.")
 
     try:
@@ -575,7 +583,7 @@ def _run_train(args, net, device, best_path):
                 _save_iter(args, net, opt, it, rb, best_path)
 
             if args.workers > 0:
-                broadcast_weights(weights_qs, net)
+                broadcast_weights(weights_path, net, weights_version)
 
             if args.eval_every and (it % args.eval_every == 0):
                 # eval gate will pause/unpause workers itself
@@ -589,21 +597,12 @@ def _run_train(args, net, device, best_path):
             stop_ev.set()
             pause_ev.clear()  # unpause so workers can see stop_ev
 
-            # Cancel feeder threads on all queues BEFORE joining workers.
-            # broadcast_weights puts 13MB payloads into weights_qs; if
-            # workers are dead, those feeder threads block on pipe write
-            # and the main process hangs on exit trying to join them.
-            for wq in weights_qs:
-                try:
-                    wq.cancel_join_thread()
-                except Exception:
-                    pass
+            # Only one multiprocessing queue remains (samples out_q); drain it
+            # so workers blocked on put() can exit.
             try:
                 out_q.cancel_join_thread()
             except Exception:
                 pass
-
-            # Drain out_q so workers blocked on put() can finish
             import queue as _queue
             for _ in range(10000):
                 try:
@@ -613,7 +612,6 @@ def _run_train(args, net, device, best_path):
                 except Exception:
                     break
 
-            # Give workers a moment to notice stop_ev, then kill stragglers
             time.sleep(2)
             for p in procs:
                 p.join(timeout=0.1)
@@ -623,6 +621,13 @@ def _run_train(args, net, device, best_path):
                     p.join(timeout=1)
 
             print("All workers stopped.")
+
+        # Clean up shared-memory weights file (best-effort).
+        try:
+            if os.path.exists(weights_path):
+                os.unlink(weights_path)
+        except Exception:
+            pass
 
 
 def _print_selfplay_info(it, c, gc):

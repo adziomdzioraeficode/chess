@@ -1,6 +1,5 @@
 """Self-play game generation and multiprocessing worker."""
 
-import io
 import os
 import random
 import time
@@ -44,40 +43,40 @@ class _SfCommon(TypedDict):
     sf_teacher_eps: float
 
 
-def _serialize_state_dict(sd: dict) -> bytes:
-    bio = io.BytesIO()
-    torch.save(sd, bio)
-    return bio.getvalue()
+def default_weights_shm_path() -> str:
+    """Path under tmpfs if available, otherwise $TMPDIR — one file shared
+    across all workers, updated atomically via tmp+rename."""
+    base = "/dev/shm" if os.path.isdir("/dev/shm") else None
+    if base is None:
+        import tempfile
+        base = tempfile.gettempdir()
+    return os.path.join(base, f"mini_az_weights_{os.getpid()}.pt")
 
 
-def _deserialize_state_dict(b: bytes, map_location="cpu") -> dict:
-    bio = io.BytesIO(b)
-    return torch.load(bio, map_location=map_location, weights_only=True)
+def broadcast_weights(weights_path: str, net: ChessNet, version_value):
+    """Publish *net* to the shared weights file and bump the version counter.
 
-
-def broadcast_weights(weights_qs, net: ChessNet):
+    All self-play workers memory-map the same file; the version counter is a
+    single 64-bit integer they poll each loop iteration. This replaces the
+    old ~22 MB x N_workers pickle-into-Queue broadcast (which spent ~0.5 s
+    and ~2 GB of RSS per iteration).
+    """
     net_cpu_sd = {k: v.detach().cpu() for k, v in net.state_dict().items()}
-    payload = _serialize_state_dict(net_cpu_sd)
-
-    for q in weights_qs:
-        try:
-            q.put_nowait(payload)
-        except Exception:
-            try:
-                _ = q.get_nowait()
-            except Exception:
-                pass
-            try:
-                q.put_nowait(payload)
-            except Exception:
-                pass
+    os.makedirs(os.path.dirname(weights_path) or ".", exist_ok=True)
+    tmp = f"{weights_path}.tmp.{os.getpid()}"
+    torch.save(net_cpu_sd, tmp)
+    os.replace(tmp, weights_path)  # atomic on POSIX; workers never see a torn file
+    with version_value.get_lock():
+        version_value.value += 1
 
 
-def broadcast_weights_initial(weights_qs, net: ChessNet):
-    net_cpu_sd = {k: v.detach().cpu() for k, v in net.state_dict().items()}
-    payload = _serialize_state_dict(net_cpu_sd)
-    for q in weights_qs:
-        q.put(payload, timeout=10)
+# Backward-compatible alias: the initial broadcast is identical to any other
+# broadcast — workers pick it up by polling the version counter.
+broadcast_weights_initial = broadcast_weights
+
+
+def _load_weights_shm(path: str, map_location="cpu") -> dict:
+    return torch.load(path, map_location=map_location, weights_only=True)
 
 
 def make_game_samples_unified(
@@ -434,7 +433,8 @@ def _run_game_vs(net, opponent_net, device, sims, max_plies, resign_threshold,
 
 def selfplay_worker(
     worker_id: int,
-    weights_q,
+    weights_path: str,
+    weights_version,
     out_q,
     stop_ev,
     pause_ev,
@@ -544,19 +544,30 @@ def selfplay_worker(
             except Exception:
                 pass
 
-        # Wait for initial weights
+        # Wait for initial weights — main publishes them via shared file and
+        # bumps `weights_version`. We poll the counter cheaply (no locks needed
+        # for reads of an `mp.Value('q')`).
+        last_seen_version = 0
         while True:
-            try:
-                wbytes = weights_q.get(timeout=30)
-                sd = _deserialize_state_dict(wbytes, map_location="cpu")
-                net.load_state_dict(sd)
-                if worker_id == 0:
-                    print(f"[worker {worker_id}] got weights")
-                break
-            except Exception:
-                if stop_ev.is_set():
-                    return
-                continue
+            v = int(weights_version.value)
+            if v > 0:
+                try:
+                    sd = _load_weights_shm(weights_path, map_location="cpu")
+                    net.load_state_dict(sd)
+                    last_seen_version = v
+                    if worker_id == 0:
+                        print(f"[worker {worker_id}] got weights (version={v})")
+                    break
+                except Exception as e:
+                    # File may be momentarily missing between tmp+rename; retry.
+                    if stop_ev.is_set():
+                        return
+                    print(f"[worker {worker_id}] initial weight load retry: {e}")
+                    time.sleep(0.2)
+                    continue
+            if stop_ev.is_set():
+                return
+            time.sleep(0.1)
 
         sf_common = _SfCommon(
             sf_engine=sf_engine,
@@ -575,16 +586,16 @@ def selfplay_worker(
                 time.sleep(1)
                 continue
 
-            latest = None
-            try:
-                while True:
-                    latest = weights_q.get_nowait()
-            except Exception:
-                pass
-
-            if latest is not None:
-                sd = _deserialize_state_dict(latest, map_location="cpu")
-                net.load_state_dict(sd)
+            # Reload network weights if a new version was published.
+            v = int(weights_version.value)
+            if v != last_seen_version:
+                try:
+                    sd = _load_weights_shm(weights_path, map_location="cpu")
+                    net.load_state_dict(sd)
+                    last_seen_version = v
+                except Exception as e:
+                    # Transient (tmp+rename) — try again on next loop.
+                    print(f"[worker {worker_id}] weight reload retry: {e}")
 
             maybe_reload_best()
             maybe_reload_opp()

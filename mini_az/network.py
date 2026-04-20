@@ -132,10 +132,16 @@ class ChessNet(nn.Module):
         pr = torch.tensor([[m[2] for m in moves]], dtype=torch.long, device=device)
         mask = torch.ones((1, len(moves)), dtype=torch.bool, device=device)
 
-        logits, wdl_logits, _ = self.forward_policy_value(bt, fs, ts, pr, mask)
-        probs = torch.softmax(logits[0], dim=0).detach().cpu().numpy()
-        priors = {moves[i][3]: float(probs[i]) for i in range(len(moves))}
+        # bfloat16 autocast: EPYC 9004 AVX-512-BF16 gives ~2x over fp32 on
+        # matmul-heavy conv/FC workloads. Softmax is then computed in fp32
+        # for numerical stability on small legal-move counts.
+        autocast_device = "cuda" if device.startswith("cuda") else "cpu"
+        with torch.autocast(device_type=autocast_device, dtype=torch.bfloat16):
+            logits, wdl_logits, _ = self.forward_policy_value(bt, fs, ts, pr, mask)
+
+        probs_list = torch.softmax(logits[0].float(), dim=0).tolist()
+        priors = {moves[i][3]: probs_list[i] for i in range(len(moves))}
         # Convert WDL to scalar: v = P(win) - P(loss)
-        wdl_probs = torch.softmax(wdl_logits[0], dim=0).detach().cpu().numpy()
-        v = float(wdl_probs[0] - wdl_probs[2])  # win - loss
+        wdl_list = torch.softmax(wdl_logits[0].float(), dim=0).tolist()
+        v = float(wdl_list[0] - wdl_list[2])  # win - loss
         return priors, v
