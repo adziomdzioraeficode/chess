@@ -36,6 +36,7 @@ from .eval_play import (
 )
 from .distill import run_distillation
 from .trainer import trainer_loop
+from .evaluator import run_eval_job
 from .train_helpers import (
     init_counters, accumulate_info, print_selfplay_info, print_z_stats,
     log_iteration_csv, save_iter,
@@ -113,6 +114,8 @@ def main():
                     help="Virtual-loss leaf batch size for worker MCTS (>=1, default 1 = sequential).")
     ap.add_argument("--trainer_threads", type=int, default=0,
                     help="Thread count for the async trainer process (0 = auto, min(24, max(8, workers))).")
+    ap.add_argument("--eval_threads", type=int, default=0,
+                    help="Thread count for the async eval process (0 = auto, max(4, workers//12)).")
 
     ap.add_argument("--sf_path", default="stockfish")
     ap.add_argument("--sf_skill", type=int, default=0)
@@ -316,6 +319,21 @@ def _run_train_orchestrator(args, net, device, best_path):
 
     import queue as _queue
 
+    # Fire-and-forget eval processes. We reap finished ones lazily so the
+    # orchestrator never waits for an eval. Workers and trainer keep running
+    # the whole time — eval just competes for CPU (sized by --eval_threads).
+    active_evals: List[BaseProcess] = []
+
+    def _reap_finished_evals():
+        nonlocal active_evals
+        still = []
+        for ep in active_evals:
+            if ep.is_alive():
+                still.append(ep)
+            else:
+                ep.join(timeout=0.1)
+        active_evals = still
+
     try:
         while True:
             if not trainer_proc.is_alive():
@@ -328,8 +346,10 @@ def _run_train_orchestrator(args, net, device, best_path):
                 if not any(alive):
                     print("[orchestrator] all workers died.")
                     break
+                _reap_finished_evals()
                 print(f"[orchestrator] waiting for trainer metrics... "
-                      f"workers_alive={sum(alive)}/{len(procs)} trainer_alive={trainer_proc.is_alive()}")
+                      f"workers_alive={sum(alive)}/{len(procs)} trainer_alive={trainer_proc.is_alive()} "
+                      f"active_evals={len(active_evals)}")
                 continue
 
             kind = msg.get("kind")
@@ -351,23 +371,22 @@ def _run_train_orchestrator(args, net, device, best_path):
                 msg["t_iter"], msg["cur_lr"],
             )
 
+            _reap_finished_evals()
             if args.eval_every and (it % args.eval_every == 0):
-                # Load the latest published weights into an eval-only net —
-                # the trainer keeps training on its own copy meanwhile.
-                eval_net = ChessNet().to(device)
-                try:
-                    eval_net.load_state_dict(torch.load(
-                        weights_path, map_location=device, weights_only=True
-                    ))
-                except Exception as e:
-                    print(f"[orchestrator] could not load eval weights: {e}")
-                    eval_net = None
-                if eval_net is not None:
-                    _run_eval_gate(
-                        args, eval_net, device, it, best_path,
-                        msg["counters"], msg["games_collected"], msg["rb_len"],
-                        pause_ev, procs,
+                # Only one eval in flight at a time — skip if previous hasn't
+                # finished yet (keeps RAM bounded and avoids duplicate work).
+                if active_evals:
+                    print(f"[orchestrator] iter {it}: previous eval still running, skipping this eval")
+                else:
+                    ep = ctx.Process(
+                        target=run_eval_job,
+                        args=(args, device, it, best_path, weights_path,
+                              msg["counters"], msg["games_collected"], msg["rb_len"]),
+                        daemon=False,  # allow eval to finish cleanly on shutdown
                     )
+                    ep.start()
+                    active_evals.append(ep)
+                    print(f"[orchestrator] iter {it}: spawned eval process pid={ep.pid}")
 
             if it >= args.iters:
                 print(f"[orchestrator] reached --iters={args.iters}, stopping.")
@@ -407,6 +426,16 @@ def _run_train_orchestrator(args, net, device, best_path):
                 p.kill()
                 p.join(timeout=1)
         print("All workers stopped.")
+
+        # Give in-flight eval processes a chance to finish writing their CSV
+        # row and atomic best.pt promotion. If they stall, kill them so the
+        # script exits.
+        for ep in active_evals:
+            ep.join(timeout=60)
+            if ep.is_alive():
+                print(f"[orchestrator] eval pid={ep.pid} exceeded timeout, terminating")
+                ep.terminate()
+                ep.join(timeout=5)
 
         try:
             if os.path.exists(weights_path):
