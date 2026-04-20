@@ -123,7 +123,7 @@ exec timeout 3h python -u -m mini_az --mode train \
     --opp_lag 5 \
     --sharp_frac 0.20 \
     --sharp_threshold 0.35 \
-    --eval_every 5 \
+    --eval_every 20 \
     --eval_games 10 \
     --eval_sims 400 \
     --sf_movetime_ms 10 \
