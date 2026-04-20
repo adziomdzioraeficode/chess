@@ -122,26 +122,58 @@ class ChessNet(nn.Module):
     @torch.no_grad()
     def policy_value_single(self, board: chess.Board, device: str,
                             history: list = None) -> PV:
-        moves = legal_moves_canonical(board)
-        if not moves:
-            return {}, 0.0
+        return self.policy_value_batch([board], device, histories=[history])[0]
 
-        bt = board_to_tensor(board, history=history).unsqueeze(0).to(device)
-        fs = torch.tensor([[m[0] for m in moves]], dtype=torch.long, device=device)
-        ts = torch.tensor([[m[1] for m in moves]], dtype=torch.long, device=device)
-        pr = torch.tensor([[m[2] for m in moves]], dtype=torch.long, device=device)
-        mask = torch.ones((1, len(moves)), dtype=torch.bool, device=device)
+    @torch.no_grad()
+    def policy_value_batch(self, boards: list, device: str,
+                            histories: list = None) -> list:
+        """Batched inference: N boards → N (priors_dict, v_scalar).
 
-        # bfloat16 autocast: EPYC 9004 AVX-512-BF16 gives ~2x over fp32 on
-        # matmul-heavy conv/FC workloads. Softmax is then computed in fp32
-        # for numerical stability on small legal-move counts.
+        Legal-move lists vary per board, so we pad to Lmax with a False mask.
+        One forward pass amortizes kernel/Python overhead across the batch —
+        the main win vs calling policy_value_single in a loop.
+        """
+        if not boards:
+            return []
+        if histories is None:
+            histories = [None] * len(boards)
+
+        per_board_moves = [legal_moves_canonical(b) for b in boards]
+        B = len(boards)
+        Lmax = max((len(m) for m in per_board_moves), default=1) or 1
+
+        bt = torch.stack(
+            [board_to_tensor(b, history=h) for b, h in zip(boards, histories)]
+        ).to(device)
+        fs = torch.zeros((B, Lmax), dtype=torch.long, device=device)
+        ts = torch.zeros((B, Lmax), dtype=torch.long, device=device)
+        pr = torch.zeros((B, Lmax), dtype=torch.long, device=device)
+        mask = torch.zeros((B, Lmax), dtype=torch.bool, device=device)
+        for i, mvs in enumerate(per_board_moves):
+            L = len(mvs)
+            if L == 0:
+                continue
+            fs[i, :L] = torch.tensor([m[0] for m in mvs], dtype=torch.long, device=device)
+            ts[i, :L] = torch.tensor([m[1] for m in mvs], dtype=torch.long, device=device)
+            pr[i, :L] = torch.tensor([m[2] for m in mvs], dtype=torch.long, device=device)
+            mask[i, :L] = True
+
+        # bfloat16 autocast: AVX-512-BF16 on EPYC 9004 gives ~2x over fp32 on
+        # matmul-heavy conv/FC workloads. Softmax runs in fp32 for stability.
         autocast_device = "cuda" if device.startswith("cuda") else "cpu"
         with torch.autocast(device_type=autocast_device, dtype=torch.bfloat16):
             logits, wdl_logits, _ = self.forward_policy_value(bt, fs, ts, pr, mask)
+        logits_f = logits.float()
+        wdl_f = wdl_logits.float()
 
-        probs_list = torch.softmax(logits[0].float(), dim=0).tolist()
-        priors = {moves[i][3]: probs_list[i] for i in range(len(moves))}
-        # Convert WDL to scalar: v = P(win) - P(loss)
-        wdl_list = torch.softmax(wdl_logits[0].float(), dim=0).tolist()
-        v = float(wdl_list[0] - wdl_list[2])  # win - loss
-        return priors, v
+        results = []
+        for i, mvs in enumerate(per_board_moves):
+            if not mvs:
+                results.append(({}, 0.0))
+                continue
+            probs_list = torch.softmax(logits_f[i, : len(mvs)], dim=0).tolist()
+            priors = {mvs[j][3]: probs_list[j] for j in range(len(mvs))}
+            wdl_list = torch.softmax(wdl_f[i], dim=0).tolist()
+            v = float(wdl_list[0] - wdl_list[2])  # P(win) - P(loss)
+            results.append((priors, v))
+        return results

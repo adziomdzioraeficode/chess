@@ -104,6 +104,8 @@ def main():
 
     ap.add_argument("--workers", type=int, default=80)
     ap.add_argument("--mp_sims", type=int, default=64)
+    ap.add_argument("--mp_leaf_batch", type=int, default=1,
+                    help="Virtual-loss leaf batch size for worker MCTS (>=1, default 1 = sequential).")
 
     ap.add_argument("--sf_path", default="stockfish")
     ap.add_argument("--sf_skill", type=int, default=0)
@@ -414,6 +416,7 @@ def _run_train(args, net, device, best_path):
                                   args.sf_teacher_multipv, args.sf_teacher_cp_cap,
                                   args.sf_teacher_cp_soft_scale, args.sf_teacher_eps,
                                   enable_sf, args.sf_elo, args.mcts_value_mix,
+                                  max(1, int(args.mp_leaf_batch)),
                                   ),
                             daemon=True)
             p.start()
@@ -462,6 +465,7 @@ def _run_train(args, net, device, best_path):
                             sf_boot_prob=args.sf_boot_prob, sf_mate_cp=10000,
                             sf_boot_depth=args.sf_boot_depth,
                             mcts_value_mix=args.mcts_value_mix,
+                            leaf_batch_size=max(1, int(args.mp_leaf_batch)),
                             sf_teacher_prob=args.sf_teacher_prob,
                             sf_teacher_mix=args.sf_teacher_mix,
                             sf_teacher_time_ms=args.sf_teacher_time_ms,

@@ -110,6 +110,7 @@ def make_game_samples_unified(
     sf_teacher_cp_cap: int = 800,
     sf_teacher_cp_soft_scale: float = 120.0,
     sf_teacher_eps: float = 0.01,
+    leaf_batch_size: int = 1,
 ):
     net_black = net_white if net_black is None else net_black
 
@@ -144,6 +145,7 @@ def make_game_samples_unified(
             policy_temp=1.0,
             dirichlet_alpha=da, dirichlet_eps=de,
             history=board_history[:HISTORY_STEPS],
+            leaf_batch_size=leaf_batch_size,
         )
 
         ms_now = material_score(board)
@@ -409,7 +411,8 @@ def _run_game_vs(net, opponent_net, device, sims, max_plies, resign_threshold,
                  sf_boot_prob, sf_cp_cap, sf_boot_depth, mcts_value_mix,
                  sf_teacher_prob, sf_teacher_mix, sf_teacher_time_ms,
                  sf_teacher_depth, sf_teacher_multipv, sf_teacher_cp_cap,
-                 sf_teacher_cp_soft_scale, sf_teacher_eps, train_color):
+                 sf_teacher_cp_soft_scale, sf_teacher_eps, train_color,
+                 leaf_batch_size: int = 1):
     """Helper: run one game net vs opponent_net, training only train_color's moves."""
     return make_game_samples_unified(
         net_white=net if train_color == chess.WHITE else opponent_net,
@@ -427,7 +430,8 @@ def _run_game_vs(net, opponent_net, device, sims, max_plies, resign_threshold,
         sf_teacher_multipv=sf_teacher_multipv, sf_teacher_cp_cap=sf_teacher_cp_cap,
         sf_teacher_cp_soft_scale=sf_teacher_cp_soft_scale,
         sf_teacher_eps=sf_teacher_eps,
-        train_only_color=train_color
+        train_only_color=train_color,
+        leaf_batch_size=leaf_batch_size,
     )
 
 
@@ -464,6 +468,7 @@ def selfplay_worker(
     enable_sf: bool = False,
     sf_elo: int = 1320,
     mcts_value_mix: float = 0.5,
+    leaf_batch_size: int = 1,
 ):
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
@@ -609,6 +614,7 @@ def selfplay_worker(
                 game_samples, res, plies, info = _run_game_vs(
                     net, best_net, device, sims, max_plies,
                     resign_threshold, resign_patience, train_color=train_color,
+                    leaf_batch_size=leaf_batch_size,
                     **sf_common
                 )
                 info["vs_best"] = True
@@ -618,6 +624,7 @@ def selfplay_worker(
                 game_samples, res, plies, info = _run_game_vs(
                     net, opp_net, device, sims, max_plies,
                     resign_threshold, resign_patience, train_color=train_color,
+                    leaf_batch_size=leaf_batch_size,
                     **sf_common
                 )
                 info["vs_best"] = False
@@ -630,6 +637,7 @@ def selfplay_worker(
                     resign_patience=resign_patience,
                     sf_bootstrap_on_star=True,
                     sf_mate_cp=10000,
+                    leaf_batch_size=leaf_batch_size,
                     **sf_common
                 )
                 info["vs_best"] = False

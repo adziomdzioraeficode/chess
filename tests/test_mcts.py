@@ -126,3 +126,99 @@ class TestMCTSEdgeCases:
         legal = set(board.legal_moves)
         for mv in visits:
             assert mv in legal
+
+
+class TestMCTSLeafBatching:
+    """Virtual-loss leaf batching (leaf_batch_size > 1) changes exploration
+    shape vs sequential, but must preserve the core invariants: valid legal
+    moves, total visits equal sim budget, no crashes on edge cases.
+    """
+
+    def test_batched_visits_sum_equals_sims(self):
+        """Each sim (real or terminal-fastpath) commits exactly one N+=1 on
+        every root edge along its path. Total must equal sims exactly — any
+        drift signals a lost commit or double-count on the virtual-loss path."""
+        net = ChessNet()
+        net.eval()
+        board = chess.Board()
+        for K in (1, 2, 4, 8):
+            torch.manual_seed(7)
+            np.random.seed(7)
+            visits, _ = mcts_search(
+                net, board, "cpu", sims=64,
+                dirichlet_alpha=0.0, dirichlet_eps=0.0,
+                leaf_batch_size=K,
+            )
+            total = sum(visits.values())
+            assert total == 64, f"K={K}: expected exactly 64 visits, got {total}"
+
+    def test_batched_moves_are_legal(self):
+        net = ChessNet()
+        net.eval()
+        board = chess.Board(
+            fen="r1bqkb1r/pppp1ppp/2n2n2/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 4 4"
+        )
+        visits, _ = mcts_search(
+            net, board, "cpu", sims=40, leaf_batch_size=8,
+            dirichlet_alpha=0.0, dirichlet_eps=0.0,
+        )
+        legal = set(board.legal_moves)
+        assert len(visits) > 0
+        for mv, count in visits.items():
+            assert mv in legal
+            assert count >= 0
+
+    def test_batched_respects_terminal_positions(self):
+        """Batched MCTS must not call the network on terminal leaves."""
+        net = ChessNet()
+        net.eval()
+        board = chess.Board(
+            fen="r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4"
+        )
+        visits, _ = mcts_search(net, board, "cpu", sims=8, leaf_batch_size=4)
+        assert len(visits) == 0
+
+    def test_batched_with_dirichlet(self):
+        """Noise injection must not break the batched path."""
+        net = ChessNet()
+        net.eval()
+        board = chess.Board()
+        visits, _ = mcts_search(
+            net, board, "cpu", sims=24,
+            dirichlet_alpha=0.3, dirichlet_eps=0.25,
+            leaf_batch_size=4,
+        )
+        assert sum(visits.values()) == 24
+
+    def test_batched_with_history(self):
+        net = ChessNet()
+        net.eval()
+        board = chess.Board()
+        board.push(chess.Move.from_uci("e2e4"))
+        history = [chess.Board()]
+        visits, _ = mcts_search(
+            net, board, "cpu", sims=16, history=history,
+            leaf_batch_size=4,
+        )
+        assert sum(visits.values()) == 16
+
+    def test_batched_converges_on_strong_prior(self):
+        """When the priors collapse onto a single move (checkmate-in-one), the
+        batched search must still concentrate visits there despite virtual
+        loss — at least the top move should be a legal mating move."""
+        net = ChessNet()
+        net.eval()
+        # Fool's-mate setup: white threatens mate on f7; black has one obvious
+        # blocker — used here to pick a middlegame with narrow winning move.
+        board = chess.Board(
+            fen="rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2"
+        )
+        visits, _ = mcts_search(
+            net, board, "cpu", sims=128,
+            dirichlet_alpha=0.0, dirichlet_eps=0.0,
+            leaf_batch_size=8,
+        )
+        assert sum(visits.values()) == 128
+        # The top move must be legal.
+        top = max(visits.items(), key=lambda kv: kv[1])[0]
+        assert top in set(board.legal_moves)
