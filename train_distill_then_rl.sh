@@ -85,6 +85,7 @@ exec timeout 3h python -u -m mini_az --mode train \
     --clear_buffer \
     --workers 92 \
     --mp_sims 128 \
+    --mp_leaf_batch 8 \
     --games_per_iter 60 \
     --iters 9999 \
     --steps_per_iter 250 \

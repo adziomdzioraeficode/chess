@@ -35,6 +35,11 @@ from .eval_play import (
     play_vs_stockfish, play_vs_random, play_vs_model, uci_loop,
 )
 from .distill import run_distillation
+from .trainer import trainer_loop
+from .train_helpers import (
+    init_counters, accumulate_info, print_selfplay_info, print_z_stats,
+    log_iteration_csv, save_iter,
+)
 
 
 def main():
@@ -106,6 +111,8 @@ def main():
     ap.add_argument("--mp_sims", type=int, default=64)
     ap.add_argument("--mp_leaf_batch", type=int, default=1,
                     help="Virtual-loss leaf batch size for worker MCTS (>=1, default 1 = sequential).")
+    ap.add_argument("--trainer_threads", type=int, default=0,
+                    help="Thread count for the async trainer process (0 = auto, min(24, max(8, workers))).")
 
     ap.add_argument("--sf_path", default="stockfish")
     ap.add_argument("--sf_skill", type=int, default=0)
@@ -231,96 +238,188 @@ def main():
         uci_loop(net, device, sims=args.sims)
 
 
-def _accumulate_info(info, counters, args):
-    """Update iteration counters from a single game's info dict."""
-    c = counters
-    c["pi_ent_sum"] += info.get("avg_pi_ent", 0.0)
-    c["v_sum"] += info.get("avg_v", 0.0)
-    c["vmin"] = min(c["vmin"], info.get("min_v", c["vmin"]))
-    c["vmax"] = max(c["vmax"], info.get("max_v", c["vmax"]))
-    c["threefold_sum"] += int(info.get("threefold_penalized", 0))
-    c["openbook_sum"] += int(info.get("opening_book_plies", 0))
-    c["ended_star_sum"] += 1 if info.get("ended_star", False) else 0
-    c["rep_moves_sum"] += info.get("rep_moves_penalized", 0)
-    c["rep_plies_sum"] += info.get("rep_plies_with_rep", 0)
-    c["rep_plies_actual_sum"] += info.get("rep_plies_actual", 0)
-    c["sf_fail_sum"] += info.get("sf_fail", 0)
-
-    if info.get("forced_end", False):
-        c["forced_end_sum"] += 1
-        k = info.get("forced_kind", "")
-        if k == "resign":
-            c["forced_resign_sum"] += 1
-        elif k == "draw_claim":
-            c["forced_draw_sum"] += 1
-
-    if info.get("sf_boot_used", False):
-        c["sf_z_sum"] += float(info.get("sf_z_white", 0.0))
-        c["sf_boot_sum"] += 1
-        c["sf_boot_n"] += 1
-        c["sf_cp_used_n"] += 1
-
-        raw = int(info.get("sf_cp_white", 0))
-        used = int(info.get("sf_cp_used", 0))
-        cap_used = int(args.sf_cp_cap)
-
-        c["sf_cp_sum"] += raw
-        c["sf_cp_used_sum"] += used
-        c["sf_cp_abs_sum"] += abs(raw)
-        c["sf_cp_used_abs_sum"] += abs(used)
-
-        c["sf_cp_min"] = min(c["sf_cp_min"], raw)
-        c["sf_cp_max"] = max(c["sf_cp_max"], raw)
-        c["sf_cp_used_min"] = min(c["sf_cp_used_min"], used)
-        c["sf_cp_used_max"] = max(c["sf_cp_used_max"], used)
-
-        if cap_used > 0 and abs(raw) > cap_used:
-            c["sf_clipped_n"] += 1
-            c["sf_cp_raw_abs_gt_cap_sum"] += 1
-
-        src = info.get("sf_boot_src", "")
-        if src == "star":
-            c["sf_boot_star_sum"] += 1
-        elif src == "forced_draw":
-            c["sf_boot_forced_draw_sum"] += 1
-        else:
-            c["sf_boot_other_sum"] += 1
-
-    frs = info.get("forced_res_str", "")
-    if frs:
-        c["forced_res_str_counts"][frs] = c["forced_res_str_counts"].get(frs, 0) + 1
-
-    c["vs_best_games"] += 1 if info.get("vs_best") else 0
-    c["vs_opp_games"] += 1 if info.get("vs_opp") else 0
-
-
-def _init_counters():
-    return {
-        "pi_ent_sum": 0.0, "v_sum": 0.0,
-        "vs_best_games": 0, "vs_opp_games": 0,
-        "vmin": 1e9, "vmax": -1e9,
-        "threefold_sum": 0,
-        "forced_end_sum": 0, "forced_resign_sum": 0, "forced_draw_sum": 0,
-        "rep_moves_sum": 0, "rep_plies_sum": 0, "rep_plies_actual_sum": 0,
-        "sf_fail_sum": 0,
-        "openbook_sum": 0, "ended_star_sum": 0,
-        "sf_boot_sum": 0, "sf_cp_sum": 0,
-        "sf_cp_used_sum": 0, "sf_cp_used_n": 0,
-        "sf_cp_min": 10**9, "sf_cp_max": -10**9,
-        "sf_cp_used_min": 10**9, "sf_cp_used_max": -10**9,
-        "sf_cp_abs_sum": 0, "sf_cp_used_abs_sum": 0,
-        "sf_clipped_n": 0, "sf_cp_raw_abs_gt_cap_sum": 0,
-        "sf_z_sum": 0.0, "sf_boot_n": 0,
-        "sf_boot_star_sum": 0, "sf_boot_forced_draw_sum": 0, "sf_boot_other_sum": 0,
-        "forced_res_str_counts": {},
-    }
-
-
 def _run_train(args, net, device, best_path):
+    """Dispatch to orchestrator (async trainer process) or inline single-process
+    path depending on args.workers."""
     b = chess.Board()
     t = board_to_tensor(b, history=None)
     assert t.shape == (INPUT_PLANES, 8, 8), f"Expected ({INPUT_PLANES},8,8), got {t.shape}"
 
+    if args.workers > 0:
+        _run_train_orchestrator(args, net, device, best_path)
+    else:
+        _run_train_inline(args, net, device, best_path)
+
+
+def _run_train_orchestrator(args, net, device, best_path):
+    """Async architecture: self-play workers generate games continuously into
+    out_q; a separate trainer process consumes them, runs gradient steps and
+    publishes fresh weights to /dev/shm. The orchestrator (this function)
+    only: spawns children, logs per-iter metrics received from the trainer,
+    runs the eval gate (which is the only thing that pauses workers + trainer),
+    and handles clean shutdown.
+    """
+    ctx = mp.get_context("spawn")
+    out_q = ctx.Queue(maxsize=max(512, args.games_per_iter * 10))
+    metrics_q = ctx.Queue(maxsize=100)
+    stop_ev = ctx.Event()
+    pause_ev = ctx.Event()
+    procs: List[BaseProcess] = []
+
+    weights_path = default_weights_shm_path()
+    weights_version = ctx.Value('q', 0)
+
+    # Publish initial weights before spawning anything — workers and trainer
+    # both block until version > 0.
+    broadcast_weights_initial(weights_path, net, weights_version)
+    print(f"Initial weights published to {weights_path} (version={weights_version.value})")
+
+    sf_worker_frac = float(np.clip(args.sf_worker_frac, 0.0, 1.0))
+    sf_enabled_workers = min(args.workers, max(0, int(round(args.workers * sf_worker_frac))))
+    for wid in range(args.workers):
+        enable_sf = (not args.no_sf) and (wid < sf_enabled_workers)
+        sf_teacher_depth = None if int(args.sf_teacher_depth) <= 0 else int(args.sf_teacher_depth)
+        p = ctx.Process(target=selfplay_worker,
+                        args=(wid, weights_path, weights_version, out_q, stop_ev, pause_ev,
+                              args.mp_sims, args.max_plies,
+                              args.resign_threshold, args.resign_patience,
+                              args.best_model, args.mix_best, args.best_reload_sec,
+                              args.opponent_model, args.mix_opp, args.opp_reload_sec,
+                              args.sf_boot_time_ms, args.sf_boot_prob,
+                              args.sf_cp_scale, args.sf_cp_cap, args.sf_boot_depth,
+                              args.sf_teacher_prob, args.sf_teacher_mix,
+                              args.sf_teacher_time_ms, sf_teacher_depth,
+                              args.sf_teacher_multipv, args.sf_teacher_cp_cap,
+                              args.sf_teacher_cp_soft_scale, args.sf_teacher_eps,
+                              enable_sf, args.sf_elo, args.mcts_value_mix,
+                              max(1, int(args.mp_leaf_batch)),
+                              ),
+                        daemon=True)
+        p.start()
+        procs.append(p)
+
+    time.sleep(1)
+    print("Workers alive:", [p.is_alive() for p in procs])
+    print(f"Stockfish-enabled workers: {sf_enabled_workers}/{args.workers} (frac={sf_worker_frac:.2f})")
+    print(f"Started {args.workers} self-play workers.")
+
+    # Spawn trainer. It does its own model/opt/scheduler/rb setup, then drains
+    # out_q continuously.
+    trainer_proc = ctx.Process(
+        target=trainer_loop,
+        args=(args, out_q, metrics_q, weights_path, weights_version,
+              best_path, stop_ev, pause_ev, device),
+        daemon=True,
+    )
+    trainer_proc.start()
+    print("Started async trainer process.")
+
+    import queue as _queue
+
+    try:
+        while True:
+            if not trainer_proc.is_alive():
+                print("[orchestrator] trainer exited — stopping.")
+                break
+            try:
+                msg = metrics_q.get(timeout=30)
+            except _queue.Empty:
+                alive = [p.is_alive() for p in procs]
+                if not any(alive):
+                    print("[orchestrator] all workers died.")
+                    break
+                print(f"[orchestrator] waiting for trainer metrics... "
+                      f"workers_alive={sum(alive)}/{len(procs)} trainer_alive={trainer_proc.is_alive()}")
+                continue
+
+            kind = msg.get("kind")
+            if kind == "ready":
+                si = int(msg.get("start_iter", 0))
+                print(f"[orchestrator] trainer ready at iter {si}")
+                continue
+            if kind == "done":
+                print("[orchestrator] trainer signaled done.")
+                break
+            if kind != "iter":
+                continue
+
+            it = int(msg["iter"])
+            log_iteration_csv(
+                args, it, msg["counters"], msg["games_collected"],
+                msg["res_counts"], msg["avg_plies"], msg["new_samples"],
+                msg["rb_len"], msg["last_m"], msg["t_sp"], msg["t_tr"],
+                msg["t_iter"], msg["cur_lr"],
+            )
+
+            if args.eval_every and (it % args.eval_every == 0):
+                # Load the latest published weights into an eval-only net —
+                # the trainer keeps training on its own copy meanwhile.
+                eval_net = ChessNet().to(device)
+                try:
+                    eval_net.load_state_dict(torch.load(
+                        weights_path, map_location=device, weights_only=True
+                    ))
+                except Exception as e:
+                    print(f"[orchestrator] could not load eval weights: {e}")
+                    eval_net = None
+                if eval_net is not None:
+                    _run_eval_gate(
+                        args, eval_net, device, it, best_path,
+                        msg["counters"], msg["games_collected"], msg["rb_len"],
+                        pause_ev, procs,
+                    )
+
+            if it >= args.iters:
+                print(f"[orchestrator] reached --iters={args.iters}, stopping.")
+                break
+    finally:
+        stop_ev.set()
+        pause_ev.clear()
+
+        try:
+            out_q.cancel_join_thread()
+        except Exception:
+            pass
+        try:
+            metrics_q.cancel_join_thread()
+        except Exception:
+            pass
+        # Drain so workers blocked on put() can exit.
+        for _ in range(10000):
+            try:
+                out_q.get_nowait()
+            except _queue.Empty:
+                break
+            except Exception:
+                break
+
+        if trainer_proc.is_alive():
+            trainer_proc.join(timeout=30)
+            if trainer_proc.is_alive():
+                trainer_proc.terminate()
+                trainer_proc.join(timeout=5)
+
+        time.sleep(1)
+        for p in procs:
+            p.join(timeout=0.1)
+        for p in procs:
+            if p.is_alive():
+                p.kill()
+                p.join(timeout=1)
+        print("All workers stopped.")
+
+        try:
+            if os.path.exists(weights_path):
+                os.unlink(weights_path)
+        except Exception:
+            pass
+
+
+def _run_train_inline(args, net, device, best_path):
+    """Single-process synchronous path (--workers 0). Kept for debugging and
+    small local runs. Still exercises the full RL loop (MCTS, replay buffer,
+    WDL/value heads, Stockfish teacher/bootstrap) but without multiprocessing.
+    """
     net.train()
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
 
@@ -337,7 +436,6 @@ def _run_train(args, net, device, best_path):
             except Exception as e2:
                 print(f"WARNING: replay buffer is corrupted ({e}). Also failed to move file: {e2}")
             rb = ReplayBuffer(maxlen=int(args.buffer))
-            print(f"Created new replay buffer (len={len(rb)} maxlen={rb.maxlen})")
     else:
         rb = ReplayBuffer(maxlen=int(args.buffer))
         print(f"Created new replay buffer (len={len(rb)} maxlen={rb.maxlen})")
@@ -345,7 +443,7 @@ def _run_train(args, net, device, best_path):
     if args.clear_buffer:
         old_len = len(rb)
         rb = ReplayBuffer(maxlen=int(args.buffer))
-        print(f"--clear_buffer: discarded {old_len} samples, fresh buffer (maxlen={rb.maxlen})")
+        print(f"--clear_buffer: discarded {old_len} samples, fresh buffer")
 
     start_iter = 0
     if args.ckpt and os.path.exists(args.ckpt):
@@ -355,17 +453,11 @@ def _run_train(args, net, device, best_path):
         except Exception as e:
             print(f"Could not load checkpoint ({e}).")
 
-    # Create LR scheduler AFTER checkpoint load so it covers remaining iters.
-    # Reset optimizer LR to the requested base LR (checkpoint may have stored
-    # the decayed LR, which would make CosineAnnealingLR get stuck at eta_min).
     for pg in opt.param_groups:
         pg['lr'] = args.lr
         pg.pop('initial_lr', None)
     remaining_iters = max(1, args.iters - start_iter)
     total_steps = remaining_iters * args.steps_per_iter
-    # Fixed warmup: 500 steps (~2-3 iterations) regardless of total iters.
-    # WARMUP_FRAC was 0.02 but with --iters 9999 + timeout 4h the entire
-    # training stayed in warmup and LR never reached the base value.
     warmup_steps = min(500, max(1, total_steps // 10))
     cosine_steps = total_steps - warmup_steps
     warmup_sched = torch.optim.lr_scheduler.LinearLR(
@@ -379,417 +471,110 @@ def _run_train(args, net, device, best_path):
         scheduler = torch.optim.lr_scheduler.SequentialLR(
             opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_steps]
         )
-    print(f"LR schedule: warmup {warmup_steps} steps → cosine {cosine_steps} steps "
-          f"(base={args.lr} eta_min={args.lr*0.01:.2e} total={total_steps})")
-
-    ctx = mp.get_context("spawn")
-    out_q = ctx.Queue(maxsize=max(512, args.games_per_iter * 10))
-    stop_ev = ctx.Event()
+    pause_ev = mp.Event()  # unused in inline path, kept for eval gate API
     procs: List[BaseProcess] = []
-    pause_ev = ctx.Event()
 
-    # Shared-memory weights distribution: one file on tmpfs + a version counter
-    # workers poll. Replaces the previous pickle-into-Queue-per-worker broadcast.
-    weights_path = default_weights_shm_path()
-    weights_version = ctx.Value('q', 0)
+    for it in range(start_iter + 1, args.iters + 1):
+        t_iter0 = time.time()
+        t_sp0 = time.time()
+        c = init_counters()
+        new_samples = 0
+        games_collected = 0
+        res_counts = {"1-0": 0, "0-1": 0, "1/2-1/2": 0, "*": 0, "other": 0}
+        plies_sum = 0
 
-    if args.workers > 0:
-        # Publish initial weights before spawning — workers wait for version>0.
-        broadcast_weights_initial(weights_path, net, weights_version)
-        print(f"Initial weights published to {weights_path} (version={weights_version.value})")
-
-        sf_worker_frac = float(np.clip(args.sf_worker_frac, 0.0, 1.0))
-        sf_enabled_workers = min(args.workers, max(0, int(round(args.workers * sf_worker_frac))))
-        for wid in range(args.workers):
-            enable_sf = (not args.no_sf) and (wid < sf_enabled_workers)
-            sf_teacher_depth = None if int(args.sf_teacher_depth) <= 0 else int(args.sf_teacher_depth)
-            p = ctx.Process(target=selfplay_worker,
-                            args=(wid, weights_path, weights_version, out_q, stop_ev, pause_ev,
-                                  args.mp_sims, args.max_plies,
-                                  args.resign_threshold, args.resign_patience,
-                                  args.best_model, args.mix_best, args.best_reload_sec,
-                                  args.opponent_model, args.mix_opp, args.opp_reload_sec,
-                                  args.sf_boot_time_ms, args.sf_boot_prob,
-                                  args.sf_cp_scale, args.sf_cp_cap, args.sf_boot_depth,
-                                  args.sf_teacher_prob, args.sf_teacher_mix,
-                                  args.sf_teacher_time_ms, sf_teacher_depth,
-                                  args.sf_teacher_multipv, args.sf_teacher_cp_cap,
-                                  args.sf_teacher_cp_soft_scale, args.sf_teacher_eps,
-                                  enable_sf, args.sf_elo, args.mcts_value_mix,
-                                  max(1, int(args.mp_leaf_batch)),
-                                  ),
-                            daemon=True)
-            p.start()
-            procs.append(p)
-
-        time.sleep(1)
-        print("Workers alive:", [p.is_alive() for p in procs])
-        print(f"Stockfish-enabled workers: {sf_enabled_workers}/{args.workers} (frac={sf_worker_frac:.2f})")
-        print(f"Started {args.workers} self-play workers.")
-
-    try:
-        for it in range(start_iter + 1, args.iters + 1):
-            t_iter0 = time.time()
-            t_sp0 = time.time()
-            c = _init_counters()
-
-            net.eval()
-            new_samples = 0
-            games_collected = 0
-            res_counts = {"1-0": 0, "0-1": 0, "1/2-1/2": 0, "*": 0, "other": 0}
-            plies_sum = 0
-
-            if args.workers == 0:
-                sf_engine = None
-                if not args.no_sf:
-                    try:
-                        sf_engine = open_stockfish_engine(
-                            stockfish_path="stockfish", threads=1, hash_mb=16,
-                            elo=args.sf_elo, skill=None
-                        )
-                    except Exception:
-                        sf_engine = None
-                try:
-                    sf_teacher_depth = None if int(args.sf_teacher_depth) <= 0 else int(args.sf_teacher_depth)
-                    for _ in trange(args.games_per_iter, desc=f"selfplay iter {it}",
-                                    leave=False, file=sys.stdout,
-                                    disable=not sys.stdout.isatty()):
-                        samples, res, plies, info = make_game_samples_unified(
-                            net_white=net, net_black=None, device=device,
-                            sims=args.sims, max_plies=args.max_plies,
-                            resign_threshold=args.resign_threshold,
-                            resign_patience=args.resign_patience,
-                            sf_engine=sf_engine, sf_bootstrap_on_star=True,
-                            sf_boot_time_ms=args.sf_boot_time_ms,
-                            sf_cp_scale=args.sf_cp_scale, sf_cp_cap=args.sf_cp_cap,
-                            sf_boot_prob=args.sf_boot_prob, sf_mate_cp=10000,
-                            sf_boot_depth=args.sf_boot_depth,
-                            mcts_value_mix=args.mcts_value_mix,
-                            leaf_batch_size=max(1, int(args.mp_leaf_batch)),
-                            sf_teacher_prob=args.sf_teacher_prob,
-                            sf_teacher_mix=args.sf_teacher_mix,
-                            sf_teacher_time_ms=args.sf_teacher_time_ms,
-                            sf_teacher_depth=sf_teacher_depth,
-                            sf_teacher_multipv=args.sf_teacher_multipv,
-                            sf_teacher_cp_cap=args.sf_teacher_cp_cap,
-                            sf_teacher_cp_soft_scale=args.sf_teacher_cp_soft_scale,
-                            sf_teacher_eps=args.sf_teacher_eps,
-                        )
-                        _accumulate_info(info, c, args)
-                        rb.add_game(samples)
-                        new_samples += len(samples)
-                        games_collected += 1
-                        plies_sum += int(plies)
-                        res_counts[res] = res_counts.get(res, 0) + 1
-                finally:
-                    if sf_engine is not None:
-                        try:
-                            sf_engine.quit()
-                        except Exception:
-                            pass
-            else:
-                while games_collected < args.games_per_iter:
-                    try:
-                        samples, res, plies, info = out_q.get(timeout=10)
-                    except queue.Empty:
-                        alive = [p.is_alive() for p in procs]
-                        print(f"[iter {it}] waiting for workers... alive={alive}")
-                        if not any(alive):
-                            raise RuntimeError("All self-play workers died.")
-                        continue
-
-                    _accumulate_info(info, c, args)
-                    rb.add_game(samples)
-                    new_samples += len(samples)
-                    games_collected += 1
-                    plies_sum += int(plies)
-                    res_counts[res] = res_counts.get(res, 0) + 1
-
-            t_sp = time.time() - t_sp0
-            sps = new_samples / max(1e-9, t_sp)
-            gps = games_collected / max(1e-9, t_sp)
-            print(f"[iter {it}] selfplay_time={t_sp:.1f}s samples/s={sps:.1f} games/s={gps:.2f}")
-
-            vs_best_rate = c["vs_best_games"] / max(1, games_collected)
-            vs_opp_rate = c["vs_opp_games"] / max(1, games_collected)
-            print(f"[iter {it}] vs_best_rate={vs_best_rate:.1%} vs_opp_rate={vs_opp_rate:.1%}")
-
-            avg_plies = plies_sum / max(1, games_collected)
-            print(
-                f"[iter {it}] collected_games={games_collected} buffer={len(rb)} new_samples={new_samples}"
-            )
-            print(
-                f"[iter {it}] selfplay results: "
-                f"1-0={res_counts.get('1-0',0)} 0-1={res_counts.get('0-1',0)} "
-                f"draw={res_counts.get('1/2-1/2',0)} cut(*)={res_counts.get('*',0)} "
-                f"other={res_counts.get('other',0)} avg_plies={avg_plies:.1f}"
-            )
-
-            if games_collected:
-                _print_selfplay_info(it, c, games_collected)
-
-            if len(rb) >= 1000:
-                _print_z_stats(it, rb)
-
-            # Training — pause workers to free CPU for training
-            old_train_nt = torch.get_num_threads()
-            if args.workers > 0:
-                pause_ev.set()
-                time.sleep(3)  # workers pause between games; wait for stragglers
-                torch.set_num_threads(min(24, max(8, args.workers)))
-            t_tr0 = time.time()
-            net.train()
-            last_m = None
-            cur_lr = scheduler.get_last_lr()[0]
-            for step in range(args.steps_per_iter):
-                if len(rb) < args.batch:
-                    continue
-                batch_s = rb.sample_batch_mixed(
-                    args.batch, recent_frac=args.recent_frac,
-                    recent_window=args.recent_window,
-                    sharp_frac=args.sharp_frac,
-                    sharp_threshold=args.sharp_threshold,
+        sf_engine = None
+        if not args.no_sf:
+            try:
+                sf_engine = open_stockfish_engine(
+                    stockfish_path="stockfish", threads=1, hash_mb=16,
+                    elo=args.sf_elo, skill=None
                 )
-                batch = collate(batch_s, device)
-                m = train_step(net, opt, batch, val_w=args.val_w, moves_left_w=args.moves_left_w)
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", message=".*epoch parameter.*deprecated.*")
-                    scheduler.step()
-                last_m = m
-                is_log_step = ((step + 1) % max(1, args.steps_per_iter // 5) == 0) or (step + 1 == args.steps_per_iter)
-                if is_log_step:
-                    cur_lr = scheduler.get_last_lr()[0]
-                    print(
-                        f"[iter {it}] step {step+1}/{args.steps_per_iter} "
-                        f"loss={m['loss']:.4f} pol={m['pol']:.4f} val={m['val']:.4f} ml={m['ml']:.4f} "
-                        f"grad={m['grad_norm']:.2f} "
-                        f"H(pred)={m['pred_ent']:.2f} H(tgt)={m['tgt_ent']:.2f} "
-                        f"v_mean={m['v_mean']:+.3f} z_mean={m['z_mean']:+.3f} corr(v,z)={m['vz_corr']:+.2f} "
-                        f"ml_mean={m['ml_mean']:.1f} ml_tgt={m['ml_tgt_mean']:.1f} "
-                        f"lr={cur_lr:.2e}"
-                    )
-            t_tr = time.time() - t_tr0
-            if args.workers > 0:
-                torch.set_num_threads(old_train_nt)
-            t_iter = time.time() - t_iter0
-            cur_lr = scheduler.get_last_lr()[0]
-            print(f"[iter {it}] train_time={t_tr:.1f}s steps/s={args.steps_per_iter/max(1e-9,t_tr):.2f}")
-            print(f"[iter {it}] iter_total_time={t_iter:.1f}s")
-
-            # --- Per-iteration CSV (train_log.csv) ---
-            _log_iteration_csv(
-                args, it, c, games_collected, res_counts, avg_plies,
-                new_samples, rb, last_m, t_sp, t_tr, t_iter, cur_lr
-            )
-
-            # Save
-            if args.save_every and (it % args.save_every == 0):
-                _save_iter(args, net, opt, it, rb, best_path)
-
-            if args.workers > 0:
-                broadcast_weights(weights_path, net, weights_version)
-
-            if args.eval_every and (it % args.eval_every == 0):
-                # eval gate will pause/unpause workers itself
-                _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pause_ev, procs)
-            elif args.workers > 0:
-                # Resume workers (no eval this iteration)
-                pause_ev.clear()
-
-    finally:
-        if args.workers > 0:
-            stop_ev.set()
-            pause_ev.clear()  # unpause so workers can see stop_ev
-
-            # Only one multiprocessing queue remains (samples out_q); drain it
-            # so workers blocked on put() can exit.
-            try:
-                out_q.cancel_join_thread()
             except Exception:
-                pass
-            import queue as _queue
-            for _ in range(10000):
-                try:
-                    out_q.get_nowait()
-                except _queue.Empty:
-                    break
-                except Exception:
-                    break
-
-            time.sleep(2)
-            for p in procs:
-                p.join(timeout=0.1)
-            for p in procs:
-                if p.is_alive():
-                    p.kill()
-                    p.join(timeout=1)
-
-            print("All workers stopped.")
-
-        # Clean up shared-memory weights file (best-effort).
+                sf_engine = None
         try:
-            if os.path.exists(weights_path):
-                os.unlink(weights_path)
-        except Exception:
-            pass
+            sf_teacher_depth = None if int(args.sf_teacher_depth) <= 0 else int(args.sf_teacher_depth)
+            for _ in trange(args.games_per_iter, desc=f"selfplay iter {it}",
+                            leave=False, file=sys.stdout,
+                            disable=not sys.stdout.isatty()):
+                samples, res, plies, info = make_game_samples_unified(
+                    net_white=net, net_black=None, device=device,
+                    sims=args.sims, max_plies=args.max_plies,
+                    resign_threshold=args.resign_threshold,
+                    resign_patience=args.resign_patience,
+                    sf_engine=sf_engine, sf_bootstrap_on_star=True,
+                    sf_boot_time_ms=args.sf_boot_time_ms,
+                    sf_cp_scale=args.sf_cp_scale, sf_cp_cap=args.sf_cp_cap,
+                    sf_boot_prob=args.sf_boot_prob, sf_mate_cp=10000,
+                    sf_boot_depth=args.sf_boot_depth,
+                    mcts_value_mix=args.mcts_value_mix,
+                    leaf_batch_size=max(1, int(args.mp_leaf_batch)),
+                    sf_teacher_prob=args.sf_teacher_prob,
+                    sf_teacher_mix=args.sf_teacher_mix,
+                    sf_teacher_time_ms=args.sf_teacher_time_ms,
+                    sf_teacher_depth=sf_teacher_depth,
+                    sf_teacher_multipv=args.sf_teacher_multipv,
+                    sf_teacher_cp_cap=args.sf_teacher_cp_cap,
+                    sf_teacher_cp_soft_scale=args.sf_teacher_cp_soft_scale,
+                    sf_teacher_eps=args.sf_teacher_eps,
+                )
+                accumulate_info(info, c, args)
+                rb.add_game(samples)
+                new_samples += len(samples)
+                games_collected += 1
+                plies_sum += int(plies)
+                res_counts[res] = res_counts.get(res, 0) + 1
+        finally:
+            if sf_engine is not None:
+                try:
+                    sf_engine.quit()
+                except Exception:
+                    pass
+
+        t_sp = time.time() - t_sp0
+        avg_plies = plies_sum / max(1, games_collected)
+        print(f"[iter {it}] selfplay_time={t_sp:.1f}s games={games_collected} buffer={len(rb)}")
+        if games_collected:
+            print_selfplay_info(it, c, games_collected)
+        if len(rb) >= 1000:
+            print_z_stats(it, rb)
+
+        t_tr0 = time.time()
+        net.train()
+        last_m = None
+        for step in range(args.steps_per_iter):
+            if len(rb) < args.batch:
+                continue
+            batch_s = rb.sample_batch_mixed(
+                args.batch, recent_frac=args.recent_frac,
+                recent_window=args.recent_window,
+                sharp_frac=args.sharp_frac,
+                sharp_threshold=args.sharp_threshold,
+            )
+            batch = collate(batch_s, device)
+            m = train_step(net, opt, batch, val_w=args.val_w, moves_left_w=args.moves_left_w)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*epoch parameter.*deprecated.*")
+                scheduler.step()
+            last_m = m
+        t_tr = time.time() - t_tr0
+        cur_lr = scheduler.get_last_lr()[0]
+        t_iter = time.time() - t_iter0
+
+        log_iteration_csv(
+            args, it, c, games_collected, res_counts, avg_plies,
+            new_samples, len(rb), last_m, t_sp, t_tr, t_iter, cur_lr
+        )
+
+        if args.save_every and (it % args.save_every == 0):
+            save_iter(args, net, opt, it, rb, best_path)
+
+        if args.eval_every and (it % args.eval_every == 0):
+            _run_eval_gate(args, net, device, it, best_path, c, games_collected, len(rb),
+                           pause_ev, procs)
 
 
-def _print_selfplay_info(it, c, gc):
-    avg_openbook = c["openbook_sum"] / gc
-    ended_star_rate = c["ended_star_sum"] / gc
-    sf_boot_rate = c["sf_boot_sum"] / gc
-    sf_boot_n = c["sf_boot_n"]
-    sf_cp_used_n = c["sf_cp_used_n"]
-    sf_cp_mean = (c["sf_cp_sum"] / sf_boot_n) if sf_boot_n else 0.0
-    sf_z_mean = (c["sf_z_sum"] / sf_boot_n) if sf_boot_n else 0.0
-    sf_cp_used_mean = (c["sf_cp_used_sum"] / sf_cp_used_n) if sf_cp_used_n else 0.0
-    sf_cp_abs_mean = (c["sf_cp_abs_sum"] / sf_boot_n) if sf_boot_n else 0.0
-    sf_cp_used_abs_mean = (c["sf_cp_used_abs_sum"] / sf_boot_n) if sf_boot_n else 0.0
-    sf_clipped_rate = (c["sf_clipped_n"] / sf_boot_n) if sf_boot_n else 0.0
-    sf_cp_raw_gt_cap_rate = (c["sf_cp_raw_abs_gt_cap_sum"] / sf_cp_used_n) if sf_cp_used_n else 0.0
-
-    frs_top = sorted(c["forced_res_str_counts"].items(), key=lambda kv: kv[1], reverse=True)[:3]
-    frs_str = ",".join([f"{k}:{v}" for k, v in frs_top]) if frs_top else "-"
-    print(
-        f"[iter {it}] selfplay info: "
-        f"avg_pi_ent={c['pi_ent_sum']/gc:.2f} "
-        f"avg_v={c['v_sum']/gc:+.3f} "
-        f"v_range=[{c['vmin']:+.2f},{c['vmax']:+.2f}] "
-        f"threefold_pen/game={c['threefold_sum']/gc:.2f} "
-        f"rep_moves_pen/game={c['rep_moves_sum']/gc:.2f} "
-        f"rep_plies_actual_per_game={c['rep_plies_actual_sum']/gc:.2f} "
-        f"sf_fail_sum={c['sf_fail_sum']} "
-        f"openbook_plies_avg={avg_openbook:.2f} "
-        f"ended_star_rate={ended_star_rate:.1%} "
-        f"sf_boot_rate={sf_boot_rate:.1%} "
-        f"sf_cp_mean={sf_cp_mean:+.1f} "
-        f"sf_cp_abs_mean={sf_cp_abs_mean:.1f} "
-        f"sf_cp_used_mean={sf_cp_used_mean:+.1f} "
-        f"sf_clipped_rate={sf_clipped_rate:.1%} "
-        f"sf_z_mean={sf_z_mean:+.3f} "
-        f"forced_end_rate={c['forced_end_sum']/gc:.1%} "
-        f"forced_resign_rate={c['forced_resign_sum']/gc:.1%} "
-        f"forced_draw_rate={c['forced_draw_sum']/gc:.1%} "
-        f"forced_res_top={frs_str}"
-    )
-
-
-def _print_z_stats(it, rb):
-    idx = np.random.randint(0, len(rb), size=1000)
-    zs = np.array([rb.data[i].z for i in idx], dtype=np.float32)
-    mean = float(zs.mean())
-    std = float(zs.std())
-    zmin = float(zs.min())
-    zmax = float(zs.max())
-    p_zero = float((np.abs(zs) < 1e-6).mean())
-    p_pos = float((zs > 1e-6).mean())
-    p_neg = float((zs < -1e-6).mean())
-    print(
-        f"[iter {it}] z stats (n=1000): "
-        f"mean={mean:+.3f} std={std:.3f} min={zmin:+.2f} max={zmax:+.2f} | "
-        f"%zero={p_zero*100:.1f}% %pos={p_pos*100:.1f}% %neg={p_neg*100:.1f}%"
-    )
-
-
-def _log_iteration_csv(args, it, c, games_collected, res_counts, avg_plies,
-                        new_samples, rb, last_m, t_sp, t_tr, t_iter, cur_lr):
-    """Write one row to train_log.csv with all iteration metrics."""
-    gc = max(1, games_collected)
-    sf_boot_n = max(1, c["sf_boot_n"]) if c["sf_boot_n"] > 0 else 1
-    row = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "iter": it,
-        # selfplay
-        "games": games_collected,
-        "new_samples": new_samples,
-        "buffer_len": len(rb),
-        "avg_plies": round(avg_plies, 1),
-        "w_1_0": res_counts.get("1-0", 0),
-        "w_0_1": res_counts.get("0-1", 0),
-        "draws": res_counts.get("1/2-1/2", 0),
-        "stars": res_counts.get("*", 0),
-        "avg_pi_ent": round(c["pi_ent_sum"] / gc, 3),
-        "avg_v": round(c["v_sum"] / gc, 4),
-        "v_min": round(c["vmin"], 3) if c["vmin"] < 1e8 else "",
-        "v_max": round(c["vmax"], 3) if c["vmax"] > -1e8 else "",
-        "forced_end_rate": round(c["forced_end_sum"] / gc, 4),
-        "forced_resign_rate": round(c["forced_resign_sum"] / gc, 4),
-        "forced_draw_rate": round(c["forced_draw_sum"] / gc, 4),
-        "sf_boot_rate": round(c["sf_boot_sum"] / gc, 4),
-        "sf_z_mean": round(c["sf_z_sum"] / sf_boot_n, 4) if c["sf_boot_n"] > 0 else "",
-        "sf_cp_abs_mean": round(c["sf_cp_abs_sum"] / sf_boot_n, 1) if c["sf_boot_n"] > 0 else "",
-        "sf_fail_sum": c["sf_fail_sum"],
-        "vs_best_rate": round(c["vs_best_games"] / gc, 3),
-        "vs_opp_rate": round(c["vs_opp_games"] / gc, 3),
-        "threefold_per_game": round(c["threefold_sum"] / gc, 2),
-        "rep_plies_per_game": round(c["rep_plies_actual_sum"] / gc, 2),
-        # training (last step values)
-        "loss": round(last_m["loss"], 5) if last_m else "",
-        "pol_loss": round(last_m["pol"], 5) if last_m else "",
-        "val_loss": round(last_m["val"], 5) if last_m else "",
-        "ml_loss": round(last_m["ml"], 5) if last_m else "",
-        "grad_norm": round(last_m["grad_norm"], 3) if last_m else "",
-        "pred_ent": round(last_m["pred_ent"], 3) if last_m else "",
-        "tgt_ent": round(last_m["tgt_ent"], 3) if last_m else "",
-        "v_mean": round(last_m["v_mean"], 4) if last_m else "",
-        "z_mean": round(last_m["z_mean"], 4) if last_m else "",
-        "vz_corr": round(last_m["vz_corr"], 4) if last_m else "",
-        "ml_mean": round(last_m["ml_mean"], 2) if last_m else "",
-        "ml_tgt_mean": round(last_m["ml_tgt_mean"], 2) if last_m else "",
-        "lr": f"{cur_lr:.2e}",
-        # timing
-        "selfplay_time_s": round(t_sp, 1),
-        "train_time_s": round(t_tr, 1),
-        "iter_time_s": round(t_iter, 1),
-        "samples_per_s": round(new_samples / max(1e-9, t_sp), 1),
-        "games_per_s": round(games_collected / max(1e-9, t_sp), 2),
-    }
-    train_csv = os.path.join(os.path.dirname(args.eval_csv) or ".", "train_log.csv")
-    append_eval_csv(train_csv, row)
-
-
-def _save_iter(args, net, opt, it, rb, best_path):
-    os.makedirs(args.save_dir, exist_ok=True)
-    path = os.path.join(args.save_dir, f"mini_az_iter_{it:05d}.pt")
-    torch.save(net.state_dict(), path)
-    torch.save(net.state_dict(), args.model)
-    if args.ckpt:
-        save_checkpoint(args.ckpt, net, opt, it)
-    if args.replay_path:
-        rb.dump(args.replay_path)
-    print(f"[iter {it}] saved weights={args.model} ckpt={args.ckpt} replay={args.replay_path}")
-
-    # Update opponent snapshot
-    opp_path = args.opponent_model
-    os.makedirs(os.path.dirname(opp_path) or ".", exist_ok=True)
-    lag_it = it - int(args.opp_lag)
-    if lag_it > 0:
-        SEARCH_BACK_MAX = max(200, int(args.opp_lag) * 4)
-        cand = None
-        for j in range(lag_it, max(0, lag_it - SEARCH_BACK_MAX), -1):
-            p = os.path.join(args.save_dir, f"mini_az_iter_{j:05d}.pt")
-            if os.path.exists(p):
-                cand = p
-                break
-        if cand is not None:
-            same = False
-            try:
-                if os.path.exists(opp_path):
-                    st_o = os.stat(opp_path)
-                    st_c = os.stat(cand)
-                    same = (st_o.st_size == st_c.st_size) and (int(st_o.st_mtime) == int(st_c.st_mtime))
-            except Exception:
-                same = False
-            if not same:
-                tmp = opp_path + f".tmp.{os.getpid()}"
-                shutil.copy2(cand, tmp)
-                os.replace(tmp, opp_path)
-                print(f"[iter {it}] updated opponent snapshot: {opp_path} <- {cand}")
-        else:
-            print(f"[iter {it}] WARNING: no snapshot found for opponent (wanted <= {lag_it})")
-
-
-def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pause_ev, procs):
+def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb_len, pause_ev, procs):
     if args.workers > 0:
         pause_ev.set()
         time.sleep(2)
@@ -960,7 +745,7 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb, pau
             "rnd_score": round(rnd_score, 4),
             "rnd_winrate": round(rnd_winrate, 4),
             "rnd_elo_diff_est": round(rnd_elo_diff, 1),
-            "replay_len": len(rb),
+            "replay_len": rb_len,
             "self_score": round(self_score, 4) if self_score is not None else "",
             "self_winrate": round(self_winrate, 4) if self_winrate is not None else "",
             "gate_kind": gate_kind,

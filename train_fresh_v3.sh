@@ -1,9 +1,9 @@
 #!/bin/bash
-# train_fresh_v3.sh — v3: 45 planes + 10×96 SE-ResNet (~5.5M) + WDL + dynamic c_puct
+# train_fresh_v3.sh — v3: 45 planes + 10x96 SE-ResNet (~5.5M) + WDL + dynamic c_puct
 #
 # V3 ARCHITECTURE (lc0-inspired home Python RL chess):
-#   - 45 input planes: 3 positions × 12 piece planes + 9 aux (castling, turn, halfmove, fullmove, check, repetition)
-#   - 10 SE-residual blocks × 96 channels (~5.5M parameters)
+#   - 45 input planes: 3 positions x 12 piece planes + 9 aux (castling, turn, halfmove, fullmove, check, repetition)
+#   - 10 SE-residual blocks x 96 channels (~5.5M parameters)
 #   - WDL value head (win/draw/loss softmax) — replaces single tanh (like lc0 T40+)
 #   - Move-embedding policy head (from/to/promo embeddings)
 #   - Dynamic c_puct: log((1+N+19652)/19652) + 2.5  (AlphaZero/lc0 formula)
@@ -26,18 +26,18 @@
 # Goal: beat Stockfish 1320 Elo (like lc0 early nets but as a home RL project)
 #
 # Tuning rationale (4h on Ds96v6):
-#   - Network 2× bigger (5.5M vs 3.3M) → inference ~1.7× slower per search
+#   - Network 2x bigger (5.5M vs 3.3M) → inference ~1.7x slower per search
 #   - 80 workers optimal on Ds96v6 (bench: 60 searches/s at 32 sims)
 #   - Training uses 32 threads during pause (bench: ~5 steps/s@batch512)
 #   - SF teacher depth-8 multipv-5: ~50ms/call, 80% prob → ~40% effective blend
-#   - mp_sims=32: 2× more games/iter vs 64 sims — faster iteration, key early on
+#   - mp_sims=32: 2x more games/iter vs 64 sims — faster iteration, key early on
 #   - steps_per_iter=200: more gradient steps to utilise the extra games
 #   - Expected iter time: ~80s selfplay + ~40s train = ~120s/iter
 #   - 4h ≈ ~120 iters (hard timeout enforced)
 #
 # Strategy (compressed for 4h):
 #   - Phase 1 (iter 1-20):  Heavy SF distillation, random init → basic piece values
-#                            (LR warmup: 2% of total steps @ 0.01× → 1× base LR)
+#                            (LR warmup: 2% of total steps @ 0.01x → 1x base LR)
 #   - Phase 2 (iter 20-60): Network starts learning tactics from SF blend
 #   - Phase 3 (iter 60+):   Cosine LR decay, should start beating random consistently
 #   - Target: beat SF 1320 Elo — evaluate every 5 iters to track progress
@@ -79,6 +79,7 @@ exec timeout 4h python -u -m mini_az --mode train \
     --clear_buffer \
     --workers 92 \
     --mp_sims 200 \
+    --mp_leaf_batch 8 \
     --games_per_iter 60 \
     --iters 9999 \
     --steps_per_iter 200 \

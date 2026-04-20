@@ -13,7 +13,7 @@
 #   4. rand_eval_games 6 → 20  (statistical significance)
 #   5. rand_eval_sims 32 → 200  (eval must use real search)
 #   6. val_w 1.0 → 2.0  (boost value head learning)
-#   7. games_per_iter 120 → 60  (compensate for 6× slower games at 200 sims)
+#   7. games_per_iter 120 → 60  (compensate for 6x slower games at 200 sims)
 #   8. workers 92 → tuned after benchmark
 #   9. sf_boot_depth 8 → 12  (stronger bootstrap signal for value)
 #  10. steps_per_iter 150 → 200 (more training per iter with better data)
@@ -67,6 +67,7 @@ exec timeout 4h python -u -m mini_az --mode train \
     --resume_opt \
     --workers 92 \
     --mp_sims 128 \
+    --mp_leaf_batch 8 \
     --games_per_iter 80 \
     --iters 9999 \
     --steps_per_iter 200 \
