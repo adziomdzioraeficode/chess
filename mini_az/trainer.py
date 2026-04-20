@@ -50,6 +50,10 @@ def trainer_loop(
 
     # --- Model + checkpoint ---
     net = ChessNet().to(device)
+    # Trainer itself doesn't run inference at batch=1, but workers reload
+    # its weights and do — set the flag here so initial-iteration workers
+    # have a consistent env (no effect on training math, which stays fp32).
+    net.use_bf16_inference = bool(getattr(args, "bf16_inference", False))
     if os.path.exists(args.model):
         try:
             net.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))

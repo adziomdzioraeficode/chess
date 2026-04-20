@@ -469,6 +469,7 @@ def selfplay_worker(
     sf_elo: int = 1320,
     mcts_value_mix: float = 0.5,
     leaf_batch_size: int = 1,
+    use_bf16_inference: bool = False,
 ):
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
@@ -491,9 +492,11 @@ def selfplay_worker(
 
     try:
         net = ChessNet().to(device)
+        net.use_bf16_inference = bool(use_bf16_inference)
         net.eval()
 
         best_net = ChessNet().to(device)
+        best_net.use_bf16_inference = bool(use_bf16_inference)
         best_net.eval()
         best_mtime = 0.0
         last_check = 0.0
@@ -522,6 +525,7 @@ def selfplay_worker(
                 pass
 
         opp_net = ChessNet().to(device)
+        opp_net.use_bf16_inference = bool(use_bf16_inference)
         opp_net.eval()
         opp_mtime = 0.0
         opp_last_check = 0.0

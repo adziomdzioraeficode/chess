@@ -116,6 +116,10 @@ def main():
                     help="Thread count for the async trainer process (0 = auto, min(24, max(8, workers))).")
     ap.add_argument("--eval_threads", type=int, default=0,
                     help="Thread count for the async eval process (0 = auto, max(4, workers//12)).")
+    ap.add_argument("--bf16_inference", action="store_true",
+                    help="Use bf16 autocast in MCTS inference. ONLY enable on AVX-512-BF16/AMX "
+                         "hardware (EPYC 9004+, Xeon SPR+) — on older CPUs PyTorch emulates "
+                         "bf16 and forward is ~13x slower.")
 
     ap.add_argument("--sf_path", default="stockfish")
     ap.add_argument("--sf_skill", type=int, default=0)
@@ -162,6 +166,9 @@ def main():
     device = resolve_device(args.device)
 
     net = ChessNet().to(device)
+    net.use_bf16_inference = bool(args.bf16_inference)
+    if args.bf16_inference:
+        print("[setup] bf16 inference autocast: ENABLED (expect ~2x on AVX-512-BF16/AMX hosts).")
 
     if os.path.exists(args.model):
         try:
@@ -296,6 +303,7 @@ def _run_train_orchestrator(args, net, device, best_path):
                               args.sf_teacher_cp_soft_scale, args.sf_teacher_eps,
                               enable_sf, args.sf_elo, args.mcts_value_mix,
                               max(1, int(args.mp_leaf_batch)),
+                              bool(args.bf16_inference),
                               ),
                         daemon=True)
         p.start()

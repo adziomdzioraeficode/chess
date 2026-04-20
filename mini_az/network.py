@@ -51,6 +51,11 @@ class ChessNet(nn.Module):
     def __init__(self, channels=96, num_blocks=10, emb_dim=32, board_dim=512, gn_groups=8, dropout: float = 0.10, se_ratio: int = 4):
         super().__init__()
         self.dropout = float(dropout)
+        # Opt-in bf16 autocast in inference. OFF by default — PyTorch emulates
+        # bf16 as fp32 on CPUs without AVX-512-BF16/AMX, which makes forward
+        # ~13x SLOWER. Set via `net.use_bf16_inference = True` (or the
+        # --bf16_inference CLI flag) on EPYC 9004+ / Xeon SPR+ hosts only.
+        self.use_bf16_inference = False
         self.board_fc = nn.Linear(channels * 8 * 8, board_dim)
 
         def _good_gn_groups(c: int, want: int) -> int:
@@ -142,26 +147,43 @@ class ChessNet(nn.Module):
         B = len(boards)
         Lmax = max((len(m) for m in per_board_moves), default=1) or 1
 
-        bt = torch.stack(
-            [board_to_tensor(b, history=h) for b, h in zip(boards, histories)]
-        ).to(device)
-        fs = torch.zeros((B, Lmax), dtype=torch.long, device=device)
-        ts = torch.zeros((B, Lmax), dtype=torch.long, device=device)
-        pr = torch.zeros((B, Lmax), dtype=torch.long, device=device)
-        mask = torch.zeros((B, Lmax), dtype=torch.bool, device=device)
+        # Fill padded (B, Lmax) buffers in numpy — one allocation per tensor,
+        # one torch.from_numpy per tensor. Previously this used torch.tensor()
+        # per row (~4 kernel launches × B), which dominated for small B.
+        fs_np = np.zeros((B, Lmax), dtype=np.int64)
+        ts_np = np.zeros((B, Lmax), dtype=np.int64)
+        pr_np = np.zeros((B, Lmax), dtype=np.int64)
+        mask_np = np.zeros((B, Lmax), dtype=bool)
         for i, mvs in enumerate(per_board_moves):
             L = len(mvs)
             if L == 0:
                 continue
-            fs[i, :L] = torch.tensor([m[0] for m in mvs], dtype=torch.long, device=device)
-            ts[i, :L] = torch.tensor([m[1] for m in mvs], dtype=torch.long, device=device)
-            pr[i, :L] = torch.tensor([m[2] for m in mvs], dtype=torch.long, device=device)
-            mask[i, :L] = True
+            for j in range(L):
+                m = mvs[j]
+                fs_np[i, j] = m[0]
+                ts_np[i, j] = m[1]
+                pr_np[i, j] = m[2]
+            mask_np[i, :L] = True
 
-        # bfloat16 autocast: AVX-512-BF16 on EPYC 9004 gives ~2x over fp32 on
-        # matmul-heavy conv/FC workloads. Softmax runs in fp32 for stability.
-        autocast_device = "cuda" if device.startswith("cuda") else "cpu"
-        with torch.autocast(device_type=autocast_device, dtype=torch.bfloat16):
+        bt = torch.stack(
+            [board_to_tensor(b, history=h) for b, h in zip(boards, histories)]
+        ).to(device)
+        fs = torch.from_numpy(fs_np).to(device)
+        ts = torch.from_numpy(ts_np).to(device)
+        pr = torch.from_numpy(pr_np).to(device)
+        mask = torch.from_numpy(mask_np).to(device)
+
+        # bfloat16 autocast is opt-in per self.use_bf16_inference. Worth ~2x
+        # on AVX-512-BF16 / AMX hardware (EPYC 9004+, Xeon SPR+); a 10-13x
+        # REGRESSION on CPUs without native BF16, where PyTorch emulates it.
+        # On CUDA we always use it (Ampere+ supports bf16 natively).
+        if device.startswith("cuda"):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                logits, wdl_logits, _ = self.forward_policy_value(bt, fs, ts, pr, mask)
+        elif self.use_bf16_inference:
+            with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+                logits, wdl_logits, _ = self.forward_policy_value(bt, fs, ts, pr, mask)
+        else:
             logits, wdl_logits, _ = self.forward_policy_value(bt, fs, ts, pr, mask)
         logits_f = logits.float()
         wdl_f = wdl_logits.float()

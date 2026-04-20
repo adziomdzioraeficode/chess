@@ -80,6 +80,7 @@ exec timeout 4h python -u -m mini_az --mode train \
     --workers 92 \
     --mp_sims 200 \
     --mp_leaf_batch 8 \
+    --bf16_inference \
     --games_per_iter 60 \
     --iters 9999 \
     --steps_per_iter 200 \

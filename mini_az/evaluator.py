@@ -48,6 +48,7 @@ def run_eval_job(args, device: str, it: int, best_path: str,
         return
 
     net = ChessNet().to(device)
+    net.use_bf16_inference = bool(getattr(args, "bf16_inference", False))
     try:
         net.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
     except Exception as e:
@@ -87,6 +88,7 @@ def run_eval_job(args, device: str, it: int, best_path: str,
     self_winrate = None
     if os.path.exists(args.opponent_model):
         opp_eval = ChessNet().to(device)
+        opp_eval.use_bf16_inference = bool(getattr(args, "bf16_inference", False))
         opp_eval.eval()
         try:
             opp_eval.load_state_dict(torch.load(
