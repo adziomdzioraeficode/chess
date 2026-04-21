@@ -22,7 +22,7 @@ from .mcts import mcts_search
 from .training import Sample
 from .stockfish import (
     open_stockfish_engine, sf_eval_cp_white, cp_to_z, sf_teacher_policy_legal,
-    SfTeacherCache,
+    SfTeacherCache, SfTeacherPrefetcher,
 )
 
 
@@ -43,6 +43,7 @@ class _SfCommon(TypedDict):
     sf_teacher_cp_soft_scale: float
     sf_teacher_eps: float
     sf_teacher_cache: "SfTeacherCache | None"
+    sf_teacher_prefetcher: "SfTeacherPrefetcher | None"
 
 
 def default_weights_shm_path() -> str:
@@ -113,6 +114,7 @@ def make_game_samples_unified(
     sf_teacher_cp_soft_scale: float = 120.0,
     sf_teacher_eps: float = 0.01,
     sf_teacher_cache: "SfTeacherCache | None" = None,
+    sf_teacher_prefetcher: "SfTeacherPrefetcher | None" = None,
     leaf_batch_size: int = 1,
 ):
     net_black = net_white if net_black is None else net_black
@@ -211,6 +213,7 @@ def make_game_samples_unified(
         )
 
         if use_teacher:
+            sf_lock = sf_teacher_prefetcher.lock if sf_teacher_prefetcher is not None else None
             teacher_p = sf_teacher_policy_legal(
                 sf_engine, board, legal_real,
                 movetime_ms=sf_teacher_time_ms,
@@ -221,6 +224,7 @@ def make_game_samples_unified(
                 cp_soft_scale=sf_teacher_cp_soft_scale,
                 eps=sf_teacher_eps,
                 cache=sf_teacher_cache,
+                lock=sf_lock,
             )
             if teacher_p is not None:
                 alpha = float(np.clip(sf_teacher_mix, 0.0, 1.0))
@@ -294,6 +298,16 @@ def make_game_samples_unified(
         board_history = [board.copy()] + board_history[:HISTORY_STEPS - 1]
         board.push(chosen_mv)
 
+        if (sf_teacher_prefetcher is not None
+            and sf_teacher_prob > 0.0
+            and not board.is_game_over(claim_draw=claim_draw)
+            and (board.ply() - ply0) < max_plies):
+            sf_teacher_prefetcher.submit(
+                board, list(board.legal_moves),
+                depth=sf_teacher_depth, multipv=sf_teacher_multipv,
+                mate_cp=sf_mate_cp, cp_cap=sf_teacher_cp_cap,
+            )
+
         if board.can_claim_threefold_repetition() or board.is_repetition(2):
             actual_rep_plies += 1
 
@@ -323,11 +337,13 @@ def make_game_samples_unified(
         if (sf_bootstrap_on_star
             and sf_engine is not None
             and (random.random() < sf_boot_prob)):
+            sf_lock = sf_teacher_prefetcher.lock if sf_teacher_prefetcher is not None else None
             cp = sf_eval_cp_white(
                 sf_engine, board,
                 movetime_ms=sf_boot_time_ms,
                 depth=sf_boot_depth,
                 mate_cp=sf_mate_cp,
+                lock=sf_lock,
             )
             if cp is not None:
                 sf_cp = cp
@@ -338,11 +354,13 @@ def make_game_samples_unified(
     winner = chess.WHITE if res == "1-0" else chess.BLACK if res == "0-1" else None
 
     if (winner is None) and (z_boot_white is None) and (sf_engine is not None) and (random.random() < sf_boot_prob):
+        sf_lock = sf_teacher_prefetcher.lock if sf_teacher_prefetcher is not None else None
         cp = sf_eval_cp_white(
             sf_engine, board,
             movetime_ms=sf_boot_time_ms,
             depth=sf_boot_depth,
             mate_cp=sf_mate_cp,
+            lock=sf_lock,
         )
         if cp is not None:
             sf_cp = cp
@@ -416,7 +434,7 @@ def _run_game_vs(net, opponent_net, device, sims, max_plies, resign_threshold,
                  sf_teacher_prob, sf_teacher_mix, sf_teacher_time_ms,
                  sf_teacher_depth, sf_teacher_multipv, sf_teacher_cp_cap,
                  sf_teacher_cp_soft_scale, sf_teacher_eps,
-                 sf_teacher_cache, train_color,
+                 sf_teacher_cache, sf_teacher_prefetcher, train_color,
                  leaf_batch_size: int = 1):
     """Helper: run one game net vs opponent_net, training only train_color's moves."""
     return make_game_samples_unified(
@@ -436,6 +454,7 @@ def _run_game_vs(net, opponent_net, device, sims, max_plies, resign_threshold,
         sf_teacher_cp_soft_scale=sf_teacher_cp_soft_scale,
         sf_teacher_eps=sf_teacher_eps,
         sf_teacher_cache=sf_teacher_cache,
+        sf_teacher_prefetcher=sf_teacher_prefetcher,
         train_only_color=train_color,
         leaf_batch_size=leaf_batch_size,
     )
@@ -477,6 +496,7 @@ def selfplay_worker(
     leaf_batch_size: int = 1,
     use_bf16_inference: bool = False,
     sf_teacher_cache_size: int = 0,
+    sf_teacher_prefetch: bool = False,
 ):
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
@@ -487,6 +507,7 @@ def selfplay_worker(
 
     sf_engine = None
     sf_teacher_cache = None
+    sf_teacher_prefetcher = None
     if enable_sf:
         try:
             sf_engine = open_stockfish_engine(
@@ -500,6 +521,8 @@ def selfplay_worker(
 
         if sf_engine is not None and int(sf_teacher_cache_size) > 0:
             sf_teacher_cache = SfTeacherCache(max_entries=int(sf_teacher_cache_size))
+            if sf_teacher_prefetch:
+                sf_teacher_prefetcher = SfTeacherPrefetcher(sf_engine, sf_teacher_cache)
 
     try:
         net = ChessNet().to(device)
@@ -600,6 +623,7 @@ def selfplay_worker(
             sf_teacher_cp_soft_scale=sf_teacher_cp_soft_scale,
             sf_teacher_eps=sf_teacher_eps,
             sf_teacher_cache=sf_teacher_cache,
+            sf_teacher_prefetcher=sf_teacher_prefetcher,
         )
 
         last_stats_log = time.time()
@@ -679,12 +703,22 @@ def selfplay_worker(
                 and sf_teacher_cache is not None
                 and (time.time() - last_stats_log) > 60.0):
                 s = sf_teacher_cache.stats()
+                pf = ""
+                if sf_teacher_prefetcher is not None:
+                    ps = sf_teacher_prefetcher.stats()
+                    pf = (f" prefetch: queued={ps['queued']} done={ps['done']} "
+                          f"dropped={ps['dropped']} skipped_hit={ps['skipped_hit']}")
                 print(f"[worker 0] sf_teacher_cache: size={s['size']} "
                       f"hits={s['hits']} misses={s['misses']} "
-                      f"hit_rate={s['hit_rate']:.2%}")
+                      f"hit_rate={s['hit_rate']:.2%}{pf}")
                 last_stats_log = time.time()
 
     finally:
+        if sf_teacher_prefetcher is not None:
+            try:
+                sf_teacher_prefetcher.close(timeout=2.0)
+            except Exception:
+                pass
         if sf_engine is not None:
             try:
                 sf_engine.quit()

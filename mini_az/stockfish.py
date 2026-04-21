@@ -1,8 +1,10 @@
 """Stockfish helpers: engine open, eval, teacher policy, cp_to_z."""
 
 import math
+import queue
+import threading
 from collections import OrderedDict
-from typing import Dict, Optional, Hashable
+from typing import Dict, List, Optional, Hashable
 
 import numpy as np
 import chess
@@ -75,10 +77,15 @@ def sf_eval_cp_white(
     movetime_ms: int = 15,
     depth: int | None = None,
     mate_cp: int = 10000,
+    lock=None,
 ) -> Optional[int]:
     try:
         limit = chess.engine.Limit(time=movetime_ms / 1000.0) if depth is None else chess.engine.Limit(depth=depth)
-        info = engine.analyse(board, limit)
+        if lock is not None:
+            with lock:
+                info = engine.analyse(board, limit)
+        else:
+            info = engine.analyse(board, limit)
 
         score = info.get("score")
         if score is None:
@@ -198,6 +205,7 @@ def sf_teacher_policy_legal(
     cp_soft_scale: float = 120.0,
     eps: float = 0.01,
     cache: "SfTeacherCache | None" = None,
+    lock=None,
 ) -> Optional[np.ndarray]:
     """Return a length-|legal_moves| probability vector derived from Stockfish
     multipv analysis of *board*. If *cache* is provided, reuse the intermediate
@@ -222,10 +230,17 @@ def sf_teacher_policy_legal(
         limit = (chess.engine.Limit(time=movetime_ms / 1000.0)
                  if depth is None else chess.engine.Limit(depth=depth))
 
-        move_cp = _sf_analyse_move_cp(
-            engine, board, legal_moves, limit,
-            multipv=multipv, mate_cp=mate_cp, cp_cap=cp_cap,
-        )
+        if lock is not None:
+            with lock:
+                move_cp = _sf_analyse_move_cp(
+                    engine, board, legal_moves, limit,
+                    multipv=multipv, mate_cp=mate_cp, cp_cap=cp_cap,
+                )
+        else:
+            move_cp = _sf_analyse_move_cp(
+                engine, board, legal_moves, limit,
+                multipv=multipv, mate_cp=mate_cp, cp_cap=cp_cap,
+            )
 
         if cacheable and move_cp:
             cache.put(board, depth, multipv, cp_cap, move_cp)
@@ -278,4 +293,104 @@ def open_stockfish_engine(
         raise RuntimeError(f"[SF] configure failed: {e} cfg={cfg}")
 
     return engine
+
+
+class SfTeacherPrefetcher:
+    """Speculatively pre-compute Stockfish teacher policies in the background.
+
+    Shares the worker's single SF engine via an RLock. The main thread
+    serialises its own teacher / bootstrap calls on the same lock, so
+    main-thread latency is never worse than before: when main wants the
+    engine it waits at most one in-flight prefetch (~depth N cost). In
+    the common case — MCTS running on CPU while SF sits idle — the
+    background thread fills that idle time by analysing the position the
+    main thread is about to ask for next, so the next synchronous teacher
+    call hits the cache populated by the prefetch.
+
+    Queue is bounded (default 2) and `submit()` drops silently when full
+    — prefetching stays a best-effort optimisation and never backs up.
+    """
+
+    _SENTINEL = object()
+
+    def __init__(self, engine: chess.engine.SimpleEngine,
+                 cache: "SfTeacherCache",
+                 max_queue: int = 2,
+                 mate_cp_default: int = 10000):
+        self.engine = engine
+        self.cache = cache
+        self.lock = threading.RLock()
+        self._q: "queue.Queue[object]" = queue.Queue(maxsize=max(1, int(max_queue)))
+        self._mate_cp_default = int(mate_cp_default)
+        self._stop = False
+        self.queued = 0
+        self.done = 0
+        self.dropped = 0
+        self.skipped_hit = 0
+        self.errors = 0
+        self._thread = threading.Thread(target=self._run, daemon=True, name="sf-prefetch")
+        self._thread.start()
+
+    def submit(self, board: chess.Board, legal_moves: List[chess.Move],
+               depth: Optional[int], multipv: int,
+               mate_cp: Optional[int] = None,
+               cp_cap: Optional[int] = None) -> bool:
+        # Prefetch only makes sense for depth-limited analyses (deterministic
+        # key) — movetime analyses would land under a non-reproducible key.
+        if depth is None or not legal_moves:
+            return False
+        if self.cache.get(board, depth, multipv, cp_cap) is not None:
+            self.skipped_hit += 1
+            return False
+        try:
+            self._q.put_nowait((
+                board.copy(stack=False), list(legal_moves),
+                int(depth), int(multipv),
+                int(mate_cp) if mate_cp is not None else self._mate_cp_default,
+                int(cp_cap) if cp_cap is not None else None,
+            ))
+            self.queued += 1
+            return True
+        except queue.Full:
+            self.dropped += 1
+            return False
+
+    def _run(self) -> None:
+        while True:
+            item = self._q.get()
+            if item is self._SENTINEL or self._stop:
+                return
+            board, legal, depth, multipv, mate_cp, cp_cap = item
+            if self.cache.get(board, depth, multipv, cp_cap) is not None:
+                self.skipped_hit += 1
+                continue
+            try:
+                limit = chess.engine.Limit(depth=depth)
+                with self.lock:
+                    if self._stop:
+                        return
+                    move_cp = _sf_analyse_move_cp(
+                        self.engine, board, legal, limit,
+                        multipv=multipv, mate_cp=mate_cp, cp_cap=cp_cap,
+                    )
+                if move_cp:
+                    self.cache.put(board, depth, multipv, cp_cap, move_cp)
+                self.done += 1
+            except Exception:
+                self.errors += 1
+
+    def stats(self) -> Dict[str, int]:
+        return {
+            "queued": self.queued, "done": self.done,
+            "dropped": self.dropped, "skipped_hit": self.skipped_hit,
+            "errors": self.errors, "qsize": self._q.qsize(),
+        }
+
+    def close(self, timeout: float = 2.0) -> None:
+        self._stop = True
+        try:
+            self._q.put_nowait(self._SENTINEL)
+        except queue.Full:
+            pass
+        self._thread.join(timeout=timeout)
 
