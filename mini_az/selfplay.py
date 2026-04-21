@@ -234,11 +234,11 @@ def make_game_samples_unified(
         counts_beh = counts_raw.copy()
 
         if adv >= 3:
-            rep_penalty, fifty_penalty, pat_penalty = 0.10, 0.15, 0.15
+            rep_penalty, fifty_penalty, pat_penalty = 0.05, 0.10, 0.10
         elif adv >= 1:
-            rep_penalty, fifty_penalty, pat_penalty = 0.25, 0.30, 0.30
+            rep_penalty, fifty_penalty, pat_penalty = 0.12, 0.20, 0.20
         else:
-            rep_penalty, fifty_penalty, pat_penalty = 0.50, 0.55, 0.50
+            rep_penalty, fifty_penalty, pat_penalty = 0.35, 0.45, 0.40
 
         rep_this_ply = False
         for i, mv in enumerate(legal_real):
@@ -368,7 +368,17 @@ def make_game_samples_unified(
         else:
             sf_fail = 1
 
-    z_draw_white = 0.0  # Clean draw; SF bootstrap overrides if available
+    # Draw-with-advantage penalty (5.2): if game drawn and one side had material
+    # advantage at the end, penalise the stronger side (wasted advantage) and
+    # slightly reward the weaker side (successful defence).  SF bootstrap
+    # overrides this when available (it gives a more accurate z).
+    z_draw_white = 0.0
+    if winner is None and z_boot_white is None:
+        end_ms = material_score(board)  # positive = white advantage
+        if abs(end_ms) >= 2:
+            # Penalise side with advantage: z = -0.12 for them (wasted)
+            # Reward defender: z = +0.08 for them
+            z_draw_white = -0.12 if end_ms > 0 else 0.12
 
     if winner == chess.WHITE:
         z_white_end = 1.0
