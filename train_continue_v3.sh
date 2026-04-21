@@ -118,7 +118,7 @@ exec timeout 4h python -u -m mini_az --mode train \
     --self_eval_games 8 \
     --self_eval_sims 64 \
     --self_eval_max_plies 150 \
-    --save_every 5 \
+    --save_every 10 \
     --val_w 2.0 \
     --gate_margin 0.005 \
     "$@"
