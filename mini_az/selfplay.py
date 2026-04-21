@@ -188,13 +188,18 @@ def make_game_samples_unified(
         if not visits:
             break
 
-        TEMP_PLY_FULL = 12
+        # Smooth temperature annealing: full exploration → near-greedy
+        TEMP_PLY_FULL = 12   # full temp until this ply
+        TEMP_PLY_MIN  = 30   # minimum temp reached at this ply
+        TEMP_HIGH     = 1.0
+        TEMP_LOW      = 0.08
         if tply < TEMP_PLY_FULL:
-            temperature = 1.0
-        elif tply < 28:
-            temperature = 0.35
+            temperature = TEMP_HIGH
+        elif tply < TEMP_PLY_MIN:
+            frac = (tply - TEMP_PLY_FULL) / (TEMP_PLY_MIN - TEMP_PLY_FULL)
+            temperature = TEMP_HIGH - (TEMP_HIGH - TEMP_LOW) * frac
         else:
-            temperature = 0.08
+            temperature = TEMP_LOW
 
         legals = legal_moves_canonical(board)
         legal_real = [m[3] for m in legals]
