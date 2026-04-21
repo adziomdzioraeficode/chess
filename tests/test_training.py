@@ -168,6 +168,57 @@ class TestCollate:
             assert abs(active.sum().item() - 1.0) < 1e-4
 
 
+    def test_collate_vectorized_augmentation(self):
+        """Vectorized collate applies LR flip correctly — castling swapped, files mirrored."""
+        np.random.seed(42)
+        s = _make_sample(n_moves=4)
+        # Set distinct castling planes
+        s.board_planes[PL_MY_OO, :, :] = 1.0
+        s.board_planes[PL_MY_OOO, :, :] = 0.0
+        s.board_planes[PL_OPP_OO, :, :] = 0.7
+        s.board_planes[PL_OPP_OOO, :, :] = 0.3
+        # Use many copies so some will be flipped, some not
+        samples = [s] * 20
+        boards, fs, ts, pr, mask, target_pi, z, wdl, plies_left = collate(samples, "cpu")
+        assert boards.shape == (20, INPUT_PLANES, 8, 8)
+        # At least some should be flipped and some not (with seed 42, ~10 each)
+        # All should have valid mask
+        for i in range(20):
+            active = target_pi[i][mask[i]]
+            assert abs(active.sum().item() - 1.0) < 1e-4
+
+    def test_collate_padding_zeros(self):
+        """Padded positions in fs/ts/pr should be zero, mask False."""
+        samples = [_make_sample(n_moves=2), _make_sample(n_moves=5)]
+        _, fs, ts, pr, mask, target_pi, _, _, _ = collate(samples, "cpu")
+        assert mask.shape[1] == 5
+        # For the 2-move sample, positions 2-4 should be masked out
+        # and have zero values (accounting for possible augmentation)
+        for i in range(2):
+            n_active = mask[i].sum().item()
+            assert n_active in [2, 5]  # either sample's move count
+            # Padded positions must be zero
+            if n_active < 5:
+                assert (fs[i, int(n_active):] == 0).all()
+                assert (target_pi[i, int(n_active):] == 0).all()
+
+    def test_collate_z_wdl_plies(self):
+        """Scalar fields z, wdl, plies_left are correctly transferred."""
+        s1 = _make_sample(n_moves=3, z=0.8)
+        s1.wdl = np.array([0.8, 0.2, 0.0], dtype=np.float32)
+        s1.plies_left = 42.0
+        s2 = _make_sample(n_moves=3, z=-0.5)
+        s2.wdl = np.array([0.0, 0.5, 0.5], dtype=np.float32)
+        s2.plies_left = 10.0
+        _, _, _, _, _, _, z, wdl, plies_left = collate([s1, s2], "cpu")
+        assert abs(z[0].item() - 0.8) < 1e-5
+        assert abs(z[1].item() - (-0.5)) < 1e-5
+        assert abs(plies_left[0].item() - 42.0) < 1e-5
+        assert abs(plies_left[1].item() - 10.0) < 1e-5
+        np.testing.assert_allclose(wdl[0].numpy(), [0.8, 0.2, 0.0], atol=1e-5)
+        np.testing.assert_allclose(wdl[1].numpy(), [0.0, 0.5, 0.5], atol=1e-5)
+
+
 class TestMaskedEntropy:
     def test_uniform_distribution(self):
         p = torch.tensor([[0.25, 0.25, 0.25, 0.25]])

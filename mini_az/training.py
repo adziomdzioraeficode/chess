@@ -195,33 +195,58 @@ def flip_sample_lr(s: Sample) -> Sample:
 
 
 def collate(samples: List[Sample], device: str):
-    aug = []
-    for s in samples:
-        if random.random() < 0.5:
-            aug.append(flip_sample_lr(s))
-        else:
-            aug.append(s)
-    samples = aug
-    B = len(samples)
-    Lmax = max(s.moves_fs.shape[0] for s in samples)
+    # --- Augmentation: vectorised LR flip decision ---
+    from .encoding import PL_MY_OO, PL_MY_OOO, PL_OPP_OO, PL_OPP_OOO
 
-    boards = torch.tensor(np.stack([s.board_planes for s in samples]), dtype=torch.float32, device=device)
-    fs = torch.full((B, Lmax), 0, dtype=torch.long, device=device)
-    ts = torch.full((B, Lmax), 0, dtype=torch.long, device=device)
-    pr = torch.full((B, Lmax), 0, dtype=torch.long, device=device)
-    mask = torch.zeros((B, Lmax), dtype=torch.bool, device=device)
-    target_pi = torch.zeros((B, Lmax), dtype=torch.float32, device=device)
-    z = torch.tensor([s.z for s in samples], dtype=torch.float32, device=device)
-    wdl = torch.tensor(np.stack([s.wdl for s in samples]), dtype=torch.float32, device=device)  # (B, 3)
-    plies_left = torch.tensor([float(getattr(s, "plies_left", 0.0)) for s in samples], dtype=torch.float32, device=device)
+    B = len(samples)
+    flip_mask = np.random.random(B) < 0.5
+
+    # Pre-compute Lmax in one pass
+    lengths = np.array([s.moves_fs.shape[0] for s in samples], dtype=np.int32)
+    Lmax = int(lengths.max()) if B > 0 else 1
+
+    # Pre-allocate numpy arrays (zero-filled = correct padding)
+    bp_arr = np.empty((B, samples[0].board_planes.shape[0], 8, 8), dtype=np.float32)
+    fs_arr = np.zeros((B, Lmax), dtype=np.int64)
+    ts_arr = np.zeros((B, Lmax), dtype=np.int64)
+    pr_arr = np.zeros((B, Lmax), dtype=np.int64)
+    mask_arr = np.zeros((B, Lmax), dtype=np.bool_)
+    pi_arr = np.zeros((B, Lmax), dtype=np.float32)
+    z_arr = np.empty(B, dtype=np.float32)
+    wdl_arr = np.empty((B, 3), dtype=np.float32)
+    pl_arr = np.empty(B, dtype=np.float32)
 
     for i, s in enumerate(samples):
-        L = s.moves_fs.shape[0]
-        fs[i, :L] = torch.tensor(s.moves_fs, dtype=torch.long, device=device)
-        ts[i, :L] = torch.tensor(s.moves_ts, dtype=torch.long, device=device)
-        pr[i, :L] = torch.tensor(s.moves_pr, dtype=torch.long, device=device)
-        mask[i, :L] = True
-        target_pi[i, :L] = torch.tensor(s.target_pi, dtype=torch.float32, device=device)
+        L = int(lengths[i])
+        if flip_mask[i]:
+            # Inline LR flip: mirror files, swap castling planes
+            bp = s.board_planes[:, :, ::-1]
+            bp_arr[i] = bp
+            bp_arr[i, PL_MY_OO], bp_arr[i, PL_MY_OOO] = bp[PL_MY_OOO].copy(), bp[PL_MY_OO].copy()
+            bp_arr[i, PL_OPP_OO], bp_arr[i, PL_OPP_OOO] = bp[PL_OPP_OOO].copy(), bp[PL_OPP_OO].copy()
+            fs_arr[i, :L] = s.moves_fs ^ 7
+            ts_arr[i, :L] = s.moves_ts ^ 7
+        else:
+            bp_arr[i] = s.board_planes
+            fs_arr[i, :L] = s.moves_fs
+            ts_arr[i, :L] = s.moves_ts
+        pr_arr[i, :L] = s.moves_pr
+        mask_arr[i, :L] = True
+        pi_arr[i, :L] = s.target_pi
+        z_arr[i] = s.z
+        wdl_arr[i] = s.wdl
+        pl_arr[i] = float(getattr(s, "plies_left", 0.0))
+
+    # Single bulk conversion numpy → torch (one .to(device) per tensor)
+    boards = torch.from_numpy(bp_arr).to(device)
+    fs = torch.from_numpy(fs_arr).to(device)
+    ts = torch.from_numpy(ts_arr).to(device)
+    pr = torch.from_numpy(pr_arr).to(device)
+    mask = torch.from_numpy(mask_arr).to(device)
+    target_pi = torch.from_numpy(pi_arr).to(device)
+    z = torch.from_numpy(z_arr).to(device)
+    wdl = torch.from_numpy(wdl_arr).to(device)
+    plies_left = torch.from_numpy(pl_arr).to(device)
 
     return boards, fs, ts, pr, mask, target_pi, z, wdl, plies_left
 
