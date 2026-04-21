@@ -732,6 +732,18 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb_len,
             prev_kind = gate_kind
             _write_best_kind(prev_kind)
 
+        # Tier ordering (higher == harder signal); keep in sync with evaluator.run_eval_job
+        TIER = {"rnd": 0, "self": 1, "sf_easy_win": 2, "sf_easy_score": 3, "sf_win": 4, "sf_score": 5}
+
+        prev_kind_current_metric = {
+            "sf_score": float(sf_score),
+            "sf_easy_score": float(sf_easy_score),
+            "sf_win": float(sf_winrate),
+            "sf_easy_win": float(sf_easy_winrate),
+            "rnd": float(rnd_score),
+            "self": float(self_score) if self_score is not None else None,
+        }.get(prev_kind)
+
         promote = False
         reason = ""
 
@@ -742,15 +754,22 @@ def _run_eval_gate(args, net, device, it, best_path, c, games_collected, rb_len,
             else:
                 promote = True
                 reason = "init"
-        elif prev_kind != gate_kind:
-            promote = False
-            reason = f"kind_mismatch(prev={prev_kind}, now={gate_kind})"
+        elif TIER.get(gate_kind, 0) > TIER.get(prev_kind, 0):
+            promote = True
+            reason = f"tier_up({prev_kind}->{gate_kind})"
         else:
-            if metric >= prev_metric + args.gate_margin:
-                promote = True
-                reason = "improved"
+            # Compare on the prev_kind scale so we never silently regress to an easier gate.
+            gate_kind = prev_kind
+            if prev_kind_current_metric is None:
+                promote = False
+                reason = f"no_metric_for_{prev_kind}"
             else:
-                reason = "not_improved"
+                metric = prev_kind_current_metric
+                if metric >= prev_metric + args.gate_margin:
+                    promote = True
+                    reason = "improved"
+                else:
+                    reason = "not_improved"
 
         if promote:
             tmp = best_path + f".tmp.{os.getpid()}"

@@ -10,7 +10,7 @@ set -euo pipefail
 
 SESSION="learning"
 LOGFILE="${1:-training_$(date +%Y%m%d_%H%M%S).log}"
-SCRIPT="train_distill_then_rl.sh"
+SCRIPT="${SCRIPT:-train_continue_v3.sh}"
 
 if [ ! -f "$SCRIPT" ]; then
     echo "ERROR: $SCRIPT not found in $(pwd)"

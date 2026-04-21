@@ -160,6 +160,20 @@ def run_eval_job(args, device: str, it: int, best_path: str,
         prev_kind = gate_kind
         _write_best_kind(prev_kind)
 
+    # Tier ordering: higher tier == harder signal. Promotion must keep or advance tier.
+    # "self" is placed below SF gates because SF is a fixed reference point.
+    TIER = {"rnd": 0, "self": 1, "sf_easy_win": 2, "sf_easy_score": 3, "sf_win": 4, "sf_score": 5}
+
+    # Metric available for prev_kind on THIS eval (so we can compare apples-to-apples).
+    prev_kind_current_metric = {
+        "sf_score": float(sf_score),
+        "sf_easy_score": float(sf_easy_score),
+        "sf_win": float(sf_winrate),
+        "sf_easy_win": float(sf_easy_winrate),
+        "rnd": float(rnd_score),
+        "self": float(self_score) if self_score is not None else None,
+    }.get(prev_kind)
+
     promote = False
     reason = ""
     if prev_metric is None:
@@ -167,13 +181,20 @@ def run_eval_job(args, device: str, it: int, best_path: str,
             promote, reason = False, "init_but_self_tie"
         else:
             promote, reason = True, "init"
-    elif prev_kind != gate_kind:
-        promote, reason = False, f"kind_mismatch(prev={prev_kind}, now={gate_kind})"
+    elif TIER.get(gate_kind, 0) > TIER.get(prev_kind, 0):
+        # Current eval qualifies for a strictly harder tier → always promote & lock higher tier.
+        promote, reason = True, f"tier_up({prev_kind}->{gate_kind})"
     else:
-        if metric >= prev_metric + args.gate_margin:
-            promote, reason = True, "improved"
+        # Keep comparing on prev_kind scale (do not silently regress to an easier gate).
+        gate_kind = prev_kind
+        if prev_kind_current_metric is None:
+            promote, reason = False, f"no_metric_for_{prev_kind}"
         else:
-            reason = "not_improved"
+            metric = prev_kind_current_metric
+            if metric >= prev_metric + args.gate_margin:
+                promote, reason = True, "improved"
+            else:
+                reason = "not_improved"
 
     if promote:
         tmp = best_path + f".tmp.{os.getpid()}"

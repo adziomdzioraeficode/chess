@@ -85,10 +85,10 @@ def play_vs_stockfish(
             elif board.is_game_over(claim_draw=True):
                 res = board.result(claim_draw=True)
             else:
-                ms = material_score(board)
-                if ms >= 3:      res = "1-0"
-                elif ms <= -3:   res = "0-1"
-                else:            res = "1/2-1/2"
+                # Game did NOT end naturally (hit max_plies). Be conservative:
+                # a material lead is not a guaranteed win against SF — count as draw.
+                # This prevents fake "wins" from being recorded as SF beats in eval.
+                res = "1/2-1/2"
 
             print(
                 f"[eval] game {g+1}/{games} END our={'W' if our_color==chess.WHITE else 'B'} "

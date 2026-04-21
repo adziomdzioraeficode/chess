@@ -95,7 +95,7 @@ exec timeout 4h python -u -m mini_az --mode train \
     --sf_path /usr/games/stockfish \
     --sf_elo 2000 \
     --sf_eval_elo 1320 \
-    --sf_eval_elo_easy 0 \
+    --sf_eval_elo_easy -1 \
     --sf_eval_max_plies 200 \
     --sf_worker_frac 0.75 \
     --sf_boot_prob 1.0 \
@@ -119,13 +119,13 @@ exec timeout 4h python -u -m mini_az --mode train \
     --sharp_frac 0.20 \
     --sharp_threshold 0.35 \
     --eval_every 20 \
-    --eval_games 10 \
-    --eval_sims 400 \
+    --eval_games 6 \
+    --eval_sims 200 \
     --sf_movetime_ms 10 \
-    --rand_eval_games 20 \
-    --rand_eval_sims 200 \
+    --rand_eval_games 10 \
+    --rand_eval_sims 128 \
     --rand_max_plies 150 \
-    --self_eval_games 12 \
+    --self_eval_games 8 \
     --self_eval_sims 64 \
     --self_eval_max_plies 150 \
     --save_every 5 \

@@ -37,17 +37,19 @@ else
     echo "Continuing anyway (training is idempotent)."
 fi
 
-# --- Keep model weights, clear bad replay data ---
-echo "=== Continuing from existing weights ==="
+# --- Keep model weights + replay buffer ---
+echo "=== Continuing from existing weights + buffer ==="
 if [ -f mini_az.pt ]; then
     echo "Found model weights: mini_az.pt ($(du -h mini_az.pt | cut -f1))"
 else
     echo "WARNING: No mini_az.pt found — will train from scratch."
 fi
 
-# Clear replay buffer (full of 32-sims garbage data)
-rm -f replay.pkl.gz replay.pkl.gz.bak
-echo "Cleared replay buffer (old 32-sims data)."
+if [ -f replay.pkl.gz ]; then
+    echo "Found replay buffer: replay.pkl.gz ($(du -h replay.pkl.gz | cut -f1))"
+else
+    echo "No replay buffer found — will start empty."
+fi
 
 # Clear old logs (new run = new metrics)
 rm -f train_log.csv eval_log.csv
@@ -63,7 +65,6 @@ mkdir -p models
 # 4h hard timeout — ensures VM cost stays bounded
 export PYTHONUNBUFFERED=1
 exec timeout 4h python -u -m mini_az --mode train \
-    --clear_buffer \
     --resume_opt \
     --workers 68 \
     --mp_sims 200 \
@@ -82,7 +83,7 @@ exec timeout 4h python -u -m mini_az --mode train \
     --sf_path /usr/games/stockfish \
     --sf_elo 2000 \
     --sf_eval_elo 1320 \
-    --sf_eval_elo_easy 0 \
+    --sf_eval_elo_easy -1 \
     --sf_eval_max_plies 200 \
     --sf_worker_frac 0.70 \
     --sf_boot_prob 1.0 \
@@ -106,13 +107,13 @@ exec timeout 4h python -u -m mini_az --mode train \
     --sharp_frac 0.20 \
     --sharp_threshold 0.35 \
     --eval_every 20 \
-    --eval_games 10 \
-    --eval_sims 400 \
+    --eval_games 6 \
+    --eval_sims 200 \
     --sf_movetime_ms 10 \
-    --rand_eval_games 20 \
-    --rand_eval_sims 200 \
+    --rand_eval_games 10 \
+    --rand_eval_sims 128 \
     --rand_max_plies 150 \
-    --self_eval_games 12 \
+    --self_eval_games 8 \
     --self_eval_sims 64 \
     --self_eval_max_plies 150 \
     --save_every 5 \
