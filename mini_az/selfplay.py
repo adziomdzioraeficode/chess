@@ -21,7 +21,8 @@ from .network import ChessNet
 from .mcts import mcts_search
 from .training import Sample
 from .stockfish import (
-    open_stockfish_engine, sf_eval_cp_white, cp_to_z, sf_teacher_policy_legal
+    open_stockfish_engine, sf_eval_cp_white, cp_to_z, sf_teacher_policy_legal,
+    SfTeacherCache,
 )
 
 
@@ -41,6 +42,7 @@ class _SfCommon(TypedDict):
     sf_teacher_cp_cap: int
     sf_teacher_cp_soft_scale: float
     sf_teacher_eps: float
+    sf_teacher_cache: "SfTeacherCache | None"
 
 
 def default_weights_shm_path() -> str:
@@ -110,6 +112,7 @@ def make_game_samples_unified(
     sf_teacher_cp_cap: int = 800,
     sf_teacher_cp_soft_scale: float = 120.0,
     sf_teacher_eps: float = 0.01,
+    sf_teacher_cache: "SfTeacherCache | None" = None,
     leaf_batch_size: int = 1,
 ):
     net_black = net_white if net_black is None else net_black
@@ -217,6 +220,7 @@ def make_game_samples_unified(
                 cp_cap=sf_teacher_cp_cap,
                 cp_soft_scale=sf_teacher_cp_soft_scale,
                 eps=sf_teacher_eps,
+                cache=sf_teacher_cache,
             )
             if teacher_p is not None:
                 alpha = float(np.clip(sf_teacher_mix, 0.0, 1.0))
@@ -323,7 +327,7 @@ def make_game_samples_unified(
                 sf_engine, board,
                 movetime_ms=sf_boot_time_ms,
                 depth=sf_boot_depth,
-                mate_cp=sf_mate_cp
+                mate_cp=sf_mate_cp,
             )
             if cp is not None:
                 sf_cp = cp
@@ -338,7 +342,7 @@ def make_game_samples_unified(
             sf_engine, board,
             movetime_ms=sf_boot_time_ms,
             depth=sf_boot_depth,
-            mate_cp=sf_mate_cp
+            mate_cp=sf_mate_cp,
         )
         if cp is not None:
             sf_cp = cp
@@ -411,7 +415,8 @@ def _run_game_vs(net, opponent_net, device, sims, max_plies, resign_threshold,
                  sf_boot_prob, sf_cp_cap, sf_boot_depth, mcts_value_mix,
                  sf_teacher_prob, sf_teacher_mix, sf_teacher_time_ms,
                  sf_teacher_depth, sf_teacher_multipv, sf_teacher_cp_cap,
-                 sf_teacher_cp_soft_scale, sf_teacher_eps, train_color,
+                 sf_teacher_cp_soft_scale, sf_teacher_eps,
+                 sf_teacher_cache, train_color,
                  leaf_batch_size: int = 1):
     """Helper: run one game net vs opponent_net, training only train_color's moves."""
     return make_game_samples_unified(
@@ -430,6 +435,7 @@ def _run_game_vs(net, opponent_net, device, sims, max_plies, resign_threshold,
         sf_teacher_multipv=sf_teacher_multipv, sf_teacher_cp_cap=sf_teacher_cp_cap,
         sf_teacher_cp_soft_scale=sf_teacher_cp_soft_scale,
         sf_teacher_eps=sf_teacher_eps,
+        sf_teacher_cache=sf_teacher_cache,
         train_only_color=train_color,
         leaf_batch_size=leaf_batch_size,
     )
@@ -470,6 +476,7 @@ def selfplay_worker(
     mcts_value_mix: float = 0.5,
     leaf_batch_size: int = 1,
     use_bf16_inference: bool = False,
+    sf_teacher_cache_size: int = 0,
 ):
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
@@ -479,6 +486,7 @@ def selfplay_worker(
     device = "cpu"
 
     sf_engine = None
+    sf_teacher_cache = None
     if enable_sf:
         try:
             sf_engine = open_stockfish_engine(
@@ -489,6 +497,9 @@ def selfplay_worker(
         except Exception as e:
             print(f"[worker {worker_id}] stockfish init failed: {e}")
             sf_engine = None
+
+        if sf_engine is not None and int(sf_teacher_cache_size) > 0:
+            sf_teacher_cache = SfTeacherCache(max_entries=int(sf_teacher_cache_size))
 
     try:
         net = ChessNet().to(device)
@@ -588,7 +599,10 @@ def selfplay_worker(
             sf_teacher_multipv=sf_teacher_multipv, sf_teacher_cp_cap=sf_teacher_cp_cap,
             sf_teacher_cp_soft_scale=sf_teacher_cp_soft_scale,
             sf_teacher_eps=sf_teacher_eps,
+            sf_teacher_cache=sf_teacher_cache,
         )
+
+        last_stats_log = time.time()
 
         while not stop_ev.is_set():
             if pause_ev.is_set():
@@ -660,6 +674,15 @@ def selfplay_worker(
                     if stop_ev.is_set():
                         return
                     return
+
+            if (worker_id == 0
+                and sf_teacher_cache is not None
+                and (time.time() - last_stats_log) > 60.0):
+                s = sf_teacher_cache.stats()
+                print(f"[worker 0] sf_teacher_cache: size={s['size']} "
+                      f"hits={s['hits']} misses={s['misses']} "
+                      f"hit_rate={s['hit_rate']:.2%}")
+                last_stats_log = time.time()
 
     finally:
         if sf_engine is not None:

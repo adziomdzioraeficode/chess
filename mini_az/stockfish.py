@@ -1,13 +1,67 @@
 """Stockfish helpers: engine open, eval, teacher policy, cp_to_z."""
 
 import math
-from typing import Optional
+from collections import OrderedDict
+from typing import Dict, Optional, Hashable
 
 import numpy as np
 import chess
 import chess.engine
 
 from .config import print  # flush-print
+
+
+class SfTeacherCache:
+    """Per-worker LRU cache for Stockfish teacher analysis results.
+
+    Stores the intermediate `move → cp` dict (before softmax) keyed by
+    (transposition_key, depth, multipv, cp_cap). cp_soft_scale and eps
+    affect only the post-softmax transformation so they are NOT part of
+    the key — we always re-softmax on hit. Engine calls cost ~50 ms;
+    dict lookup + softmax is ~100 us, so a ~20% hit rate reclaims a
+    meaningful share of worker wall-time, especially in openings and
+    forced-sequence mid-games where transpositions are common.
+    """
+
+    def __init__(self, max_entries: int = 10000):
+        self.max = int(max_entries)
+        self._cache: "OrderedDict[Hashable, Dict[chess.Move, int]]" = OrderedDict()
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def _make_key(board: chess.Board, depth, multipv, cp_cap) -> Hashable:
+        try:
+            bk = board._transposition_key()
+        except Exception:
+            bk = board.fen()
+        return (bk, depth, int(multipv), int(cp_cap) if cp_cap is not None else -1)
+
+    def get(self, board, depth, multipv, cp_cap) -> Optional[Dict[chess.Move, int]]:
+        k = self._make_key(board, depth, multipv, cp_cap)
+        v = self._cache.get(k)
+        if v is None:
+            self.misses += 1
+            return None
+        self._cache.move_to_end(k)
+        self.hits += 1
+        return v
+
+    def put(self, board, depth, multipv, cp_cap, move_cp: Dict[chess.Move, int]) -> None:
+        k = self._make_key(board, depth, multipv, cp_cap)
+        self._cache[k] = move_cp
+        self._cache.move_to_end(k)
+        while len(self._cache) > self.max:
+            self._cache.popitem(last=False)
+
+    def stats(self) -> Dict[str, int]:
+        total = self.hits + self.misses
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "size": len(self._cache),
+            "hit_rate": (self.hits / total) if total > 0 else 0.0,
+        }
 
 
 def elo_diff_from_score(score: float) -> float:
@@ -52,10 +106,90 @@ def cp_to_z(cp_white: int, cp_scale: float = 1500.0, cp_cap: int = 1500) -> floa
     return float(np.tanh(x))
 
 
+def _sf_analyse_move_cp(
+    engine: chess.engine.SimpleEngine,
+    board: chess.Board,
+    legal_moves: list,
+    limit: chess.engine.Limit,
+    multipv: int,
+    mate_cp: int,
+    cp_cap: Optional[int],
+) -> Dict[chess.Move, int]:
+    """Run one engine.analyse and return the {move: cp_from_turn_perspective}
+    dict (before softmax). Isolated so the cache can store it."""
+    infos = engine.analyse(board, limit, multipv=int(multipv))
+    if isinstance(infos, dict):
+        infos = [infos]
+
+    move_cp: Dict[chess.Move, int] = {}
+    for info in infos:
+        pv = info.get("pv")
+        if not pv:
+            continue
+        mv0 = pv[0]
+        if mv0 not in legal_moves:
+            continue
+        score = info.get("score")
+        if score is None:
+            continue
+
+        s_white = score.pov(chess.WHITE)
+        if s_white.is_mate():
+            m = s_white.mate()
+            if m is None:
+                cp_white = 0
+            else:
+                cp_white = mate_cp if m > 0 else -mate_cp
+        else:
+            cp = s_white.score(mate_score=mate_cp)
+            if cp is None:
+                continue
+            cp_white = int(cp)
+
+        cp_turn = cp_white if board.turn == chess.WHITE else -cp_white
+        if cp_cap is not None:
+            cp_turn = max(-int(cp_cap), min(int(cp_cap), int(cp_turn)))
+
+        old = move_cp.get(mv0, None)
+        if (old is None) or (cp_turn > old):
+            move_cp[mv0] = cp_turn
+    return move_cp
+
+
+def _move_cp_to_policy(
+    legal_moves: list,
+    move_cp: Dict[chess.Move, int],
+    cp_soft_scale: float,
+    eps: float,
+) -> Optional[np.ndarray]:
+    """Apply softmax + eps smoothing over legal moves. Cheap (~100 us)."""
+    if not move_cp:
+        return None
+    L = len(legal_moves)
+    logits = np.full((L,), -1e9, dtype=np.float64)
+    for i, mv in enumerate(legal_moves):
+        if mv in move_cp:
+            logits[i] = float(move_cp[mv]) / float(cp_soft_scale)
+
+    m = np.max(logits)
+    if not np.isfinite(m):
+        return None
+    exp = np.exp(logits - m)
+    s = float(exp.sum())
+    if s <= 0:
+        return None
+    p_top = exp / s
+
+    e = float(np.clip(eps, 0.0, 0.5))
+    p = (1.0 - e) * p_top + (e / L)
+    p = p / (p.sum() + 1e-12)
+    return p.astype(np.float32)
+
+
 def sf_teacher_policy_legal(
     engine: "chess.engine.SimpleEngine | None",
     board: chess.Board,
-    legal_moves: list[chess.Move],
+    legal_moves: list,
     movetime_ms: int = 15,
     depth: int | None = None,
     multipv: int = 4,
@@ -63,77 +197,40 @@ def sf_teacher_policy_legal(
     cp_cap: int = 800,
     cp_soft_scale: float = 120.0,
     eps: float = 0.01,
+    cache: "SfTeacherCache | None" = None,
 ) -> Optional[np.ndarray]:
+    """Return a length-|legal_moves| probability vector derived from Stockfish
+    multipv analysis of *board*. If *cache* is provided, reuse the intermediate
+    analysis on position + (depth, multipv, cp_cap) hits — saves the ~50ms
+    engine call. cp_soft_scale and eps affect only the post-softmax shaping
+    and are applied every call, so they can vary across callers without
+    invalidating the cache.
+    """
     try:
         if not legal_moves or (engine is None):
             return None
 
-        limit = chess.engine.Limit(time=movetime_ms / 1000.0) if depth is None else chess.engine.Limit(depth=depth)
+        # Only positions with a fixed depth (not movetime) are cacheable —
+        # wall-clock-limited analyses give non-deterministic move_cp.
+        cacheable = cache is not None and depth is not None
 
-        infos = engine.analyse(board, limit, multipv=int(multipv))
-        if isinstance(infos, dict):
-            infos = [infos]
+        if cacheable:
+            cached = cache.get(board, depth, multipv, cp_cap)
+            if cached is not None:
+                return _move_cp_to_policy(legal_moves, cached, cp_soft_scale, eps)
 
-        move_cp: dict[chess.Move, int] = {}
+        limit = (chess.engine.Limit(time=movetime_ms / 1000.0)
+                 if depth is None else chess.engine.Limit(depth=depth))
 
-        for info in infos:
-            pv = info.get("pv")
-            if not pv:
-                continue
-            mv0 = pv[0]
-            if mv0 not in legal_moves:
-                continue
+        move_cp = _sf_analyse_move_cp(
+            engine, board, legal_moves, limit,
+            multipv=multipv, mate_cp=mate_cp, cp_cap=cp_cap,
+        )
 
-            score = info.get("score")
-            if score is None:
-                continue
+        if cacheable and move_cp:
+            cache.put(board, depth, multipv, cp_cap, move_cp)
 
-            s_white = score.pov(chess.WHITE)
-            if s_white.is_mate():
-                m = s_white.mate()
-                if m is None:
-                    cp_white = 0
-                else:
-                    cp_white = mate_cp if m > 0 else -mate_cp
-            else:
-                cp = s_white.score(mate_score=mate_cp)
-                if cp is None:
-                    continue
-                cp_white = int(cp)
-
-            cp_turn = cp_white if board.turn == chess.WHITE else -cp_white
-
-            if cp_cap is not None:
-                cp_turn = max(-int(cp_cap), min(int(cp_cap), int(cp_turn)))
-
-            old = move_cp.get(mv0, None)
-            if (old is None) or (cp_turn > old):
-                move_cp[mv0] = cp_turn
-
-        if not move_cp:
-            return None
-
-        L = len(legal_moves)
-        logits = np.full((L,), -1e9, dtype=np.float64)
-
-        for i, mv in enumerate(legal_moves):
-            if mv in move_cp:
-                logits[i] = float(move_cp[mv]) / float(cp_soft_scale)
-
-        m = np.max(logits)
-        if not np.isfinite(m):
-            return None
-        exp = np.exp(logits - m)
-        s = float(exp.sum())
-        if s <= 0:
-            return None
-        p_top = exp / s
-
-        eps = float(np.clip(eps, 0.0, 0.5))
-        p = (1.0 - eps) * p_top + (eps / L)
-
-        p = p / (p.sum() + 1e-12)
-        return p.astype(np.float32)
+        return _move_cp_to_policy(legal_moves, move_cp, cp_soft_scale, eps)
 
     except Exception:
         return None
@@ -181,3 +278,4 @@ def open_stockfish_engine(
         raise RuntimeError(f"[SF] configure failed: {e} cfg={cfg}")
 
     return engine
+

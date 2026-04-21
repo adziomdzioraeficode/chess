@@ -149,6 +149,8 @@ def main():
     ap.add_argument("--sf_teacher_cp_cap", type=int, default=800)
     ap.add_argument("--sf_teacher_cp_soft_scale", type=float, default=210.0)
     ap.add_argument("--sf_teacher_eps", type=float, default=0.01)
+    ap.add_argument("--sf_teacher_cache_size", type=int, default=10000,
+                    help="LRU entries per worker for SF teacher policy cache (0=off)")
 
     ap.add_argument("--clear_buffer", action="store_true",
                     help="Discard replay buffer on startup (keep model weights)")
@@ -304,6 +306,7 @@ def _run_train_orchestrator(args, net, device, best_path):
                               enable_sf, args.sf_elo, args.mcts_value_mix,
                               max(1, int(args.mp_leaf_batch)),
                               bool(args.bf16_inference),
+                              int(args.sf_teacher_cache_size),
                               ),
                         daemon=True)
         p.start()
