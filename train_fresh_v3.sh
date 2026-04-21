@@ -83,8 +83,8 @@ exec timeout 4h python -u -m mini_az --mode train \
     --mp_leaf_batch 16 \
     --games_per_iter 60 \
     --iters 9999 \
-    --steps_per_iter 200 \
-    --batch 512 \
+    --steps_per_iter 100 \
+    --batch 1024 \
     --lr 1e-3 \
     --buffer 500000 \
     --recent_frac 0.75 \
