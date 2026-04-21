@@ -1,7 +1,7 @@
 # Plan optymalizacji mini_az (Etap 1–4)
 
 Referencyjny snapshot planu i stanu wdrożenia, żeby można było podjąć
-wątek z innego komputera. Ostatnia aktualizacja: 2026-04-21 (Etap 5 dodany).
+wątek z innego komputera. Ostatnia aktualizacja: 2026-04-21 (Etap 5: 5.1+5.2+5.3+5.5 zaimplementowane).
 
 **Cel nadrzędny**: ~3–5× wall-clock throughput (iter/4h) bez zmian w semantyce
 RL. Baseline ~80 iter w 4h na Azure D96s → docelowo ~250–350 iter.
@@ -432,16 +432,16 @@ po walidacji powyższych.
 | 4.2 SF teacher prefetch (tło + RLock) | ✅ | `d632e41` |
 | 4.3 szersza sieć (128×12 / 160×10) | ⬜ do rozważenia | — |
 | 4.4 replay diskless | ⏭️ niskopriorytetowe (analiza → brak bottlenecku) | — |
-| 5.1 collate vectorization | ⬜ następny | — |
-| 5.2 anti-repetition tuning | ⬜ następny | — |
-| 5.3 larger effective batch (1024) | ⬜ następny | — |
+| 5.1 collate vectorization | ✅ | `2218f9c` |
+| 5.2 anti-repetition tuning | ✅ | `66394fa` |
+| 5.3 larger effective batch (1024) | ✅ | `09c5028` |
 | 5.4 persistent per-worker PV cache | ⬜ po walidacji 5.1–5.3 | — |
-| 5.5 smooth temperature annealing | ⬜ następny | — |
+| 5.5 smooth temperature annealing | ✅ | `6a3f115` |
 | 5.6 adaptive SF teacher depth | ⬜ po walidacji 5.1–5.3 | — |
 | 5.7 moves-left search integration | ⬜ eksperyment | — |
 | 5.8 dynamic games_per_iter | ⬜ po walidacji 5.1–5.3 | — |
 
-**Testy**: 112/112 zielone (100 dotychczasowych + 7 dla 4.1 cache + 5 dla 4.2 prefetch).
+**Testy**: 133/133 zielone (+3 collate, +9 anti-repetition, +9 temperature).
 
 ---
 
