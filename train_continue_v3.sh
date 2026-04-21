@@ -71,9 +71,9 @@ exec timeout 4h python -u -m mini_az --mode train \
     --mp_leaf_batch 16 \
     --games_per_iter 80 \
     --iters 9999 \
-    --steps_per_iter 200 \
+    --steps_per_iter 150 \
     --batch 512 \
-    --lr 3e-4 \
+    --lr 2e-4 \
     --buffer 500000 \
     --recent_frac 0.70 \
     --recent_window 200000 \
@@ -105,7 +105,7 @@ exec timeout 4h python -u -m mini_az --mode train \
     --moves_left_w 0.15 \
     --mix_best 0.25 \
     --mix_opp 0.15 \
-    --opp_lag 5 \
+    --opp_lag 10 \
     --sharp_frac 0.20 \
     --sharp_threshold 0.35 \
     --eval_every 20 \
@@ -119,6 +119,6 @@ exec timeout 4h python -u -m mini_az --mode train \
     --self_eval_sims 64 \
     --self_eval_max_plies 150 \
     --save_every 10 \
-    --val_w 2.0 \
+    --val_w 2.5 \
     --gate_margin 0.005 \
     "$@"
