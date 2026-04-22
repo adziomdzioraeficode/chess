@@ -196,17 +196,10 @@ cython_debug/
 .pypirc
 
 # ---- mini_az chess training artifacts ----
-# Replay buffer (huge, low-quality data should be regenerated)
-replay.pkl.gz
+# Large files tracked via Git LFS (*.pt, *.pkl.gz):
+#   mini_az_ckpt.pt, replay.pkl.gz, models/mini_az_iter_*.pt, models/opponent.pt
+# Backup replay buffer (not needed in repo — only latest matters)
 replay.pkl.gz.bak
-# Training/eval logs (per-run, regenerated)
-train_log.csv
-eval_log.csv
-# Intermediate iteration snapshots (keep best.pt and mini_az.pt only)
-models/mini_az_iter_*.pt
-models/opponent.pt
-# Checkpoint with optimizer state (large, resume on same machine)
-mini_az_ckpt.pt
 
 # Cursor
 #  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
