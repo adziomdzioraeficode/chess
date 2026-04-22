@@ -1,7 +1,7 @@
 # Plan optymalizacji mini_az (Etap 1–4)
 
 Referencyjny snapshot planu i stanu wdrożenia, żeby można było podjąć
-wątek z innego komputera. Ostatnia aktualizacja: 2026-04-21 (Etap 5: 5.1+5.2+5.3+5.5 zaimplementowane).
+wątek z innego komputera. Ostatnia aktualizacja: 2026-04-22 (Etap 5 faza 2: 5.9+5.10+5.11).
 
 **Cel nadrzędny**: ~3–5× wall-clock throughput (iter/4h) bez zmian w semantyce
 RL. Baseline ~80 iter w 4h na Azure D96s → docelowo ~250–350 iter.
@@ -387,22 +387,72 @@ będzie pustego treningu. Adaptive buffer fill = mniejszy jitter w iter_time.
 
 ---
 
+### 5.9 Gradient accumulation — OCZEKIWANY ZYSK: ~50% szybszy train phase
+
+**Problem (z run 2)**: train_time=109-140s to 99% iter_time. batch=1024 × 80
+steps → każdy step ~1.5s. Podwojenie batcha na 2048 zmniejsza wariancję
+gradientów, ale single batch 2048 może być wolniejszy per-step.
+
+**Zmiana**: `--grad_accum 2` — trainer robi 2 mini-batchów 1024, akumuluje
+gradienty (loss *= 0.5), jeden optimizer.step(). Steps=40 zamiast 80.
+Efektywny batch = 2048, ale pamięć jak przy 1024.
+
+**Pliki**: `mini_az/training.py:train_step()` (loss_scale + do_step params),
+`mini_az/trainer.py` (loop z accumulation), `mini_az/main.py` (CLI --grad_accum).
+
+---
+
+### 5.10 Decisive sample mining + silniejszy SF teacher
+
+**Problem (z run 2)**: pol_loss plateau 2.06-2.10. Model widzi głównie
+remisowe próbki (~34% draws). SF teacher mix=0.35 to za mało — model's own
+policy (która jest słaba) nadal dominuje w targetach.
+
+**Zmiany**:
+A) `--decisive_frac 0.15` — 15% batcha z próbek z |z|>0.3 (wygrane/przegrane).
+   Rejection sampling na ReplayBuffer, fallback na uniform.
+B) `sf_teacher_prob 0.60→0.75` — częściej używaj SF do policy target.
+C) `sf_teacher_mix 0.35→0.50` — silniejszy wpływ SF na policy target.
+
+**Pliki**: `mini_az/training.py` (_sample_indices_decisive, sample_batch_mixed),
+`mini_az/main.py` (CLI --decisive_frac).
+
+---
+
+### 5.11 Repetition z-penalty — OCZEKIWANY ZYSK: mniej shufflingu
+
+**Problem (z run 2)**: threefold_per_game wzrosło 11→16 mimo 5.2 (behavior
+penalty). Kary na behaviour zmniejszają P(wyboru), ale VALUE sieci nie wie
+że shuffling jest zły. Trzeba karać w z-target.
+
+**Zmiana**: Post-game z-target scaling: actual_rep_plies >=10 → z_target
+mnożony przez scale (1.0→0.5 liniowo dla 10-30 rep plies). Effect: value
+head uczy się, że pozycje z repetycjami mają niższą wartość.
+
+**Pliki**: `mini_az/selfplay.py` (przed pętlą tworzenia sampli).
+
+---
+
 ### Sugerowana kolejność implementacji Etapu 5
 
-| # | Punkt | Trudność | Gain | Priorytet |
-|---|---|---|---|---|
-| 1 | 5.1 Collate vectorization | Niska | −15–25% train time | 🔴 NAJWYŻSZY |
-| 2 | 5.2 Anti-repetition tuning | Niska | −15–25% draws | 🔴 WYSOKI |
-| 3 | 5.5 Smooth temp annealing | Trivial | lepszy signal | 🟡 ŚREDNI |
-| 4 | 5.3 Larger batch | Trivial (CLI) | stabilne grady | 🟡 ŚREDNI |
-| 5 | 5.4 Persistent PV cache | Średnia | −5–10% selfplay | 🟡 ŚREDNI |
-| 6 | 5.6 Adaptive SF depth | Niska | −10–15% SF CPU | 🟢 NISKI |
-| 7 | 5.8 Dynamic games_per_iter | Średnia | −5–8% wait | 🟢 NISKI |
-| 8 | 5.7 ML search integration | Wysoka | mniej shufflingu | 🟢 EKSPERYMENT |
+**Faza 1 (run 2 — zrealizowana):**
 
-Rekomendacja: **5.1 + 5.2 + 5.5 + 5.3** w jednym commicie → następny 4h run →
-walidacja na danych. Potem 5.4 + 5.6. Punkt 5.7 (ML search) zostawić na eksperyment
-po walidacji powyższych.
+| # | Punkt | Status |
+|---|---|---|
+| 1 | 5.1 Collate vectorization | ✅ |
+| 2 | 5.2 Anti-repetition tuning | ✅ |
+| 3 | 5.3 Larger batch (1024) | ✅ |
+| 4 | 5.5 Smooth temp annealing | ✅ |
+
+**Faza 2 (run 3 — po analizie run 2, zmiana priorytetów):**
+5.4/5.6/5.8 pominięte — celowały w selfplay (1s), a bottleneck to train (120s).
+
+| # | Punkt | Status |
+|---|---|---|
+| 5 | 5.9 Gradient accumulation (2×1024) | ✅ |
+| 6 | 5.10 Decisive mining + SF teacher boost | ✅ |
+| 7 | 5.11 Repetition z-penalty | ✅ |
+| 8 | 5.7 ML search integration | ⬜ EKSPERYMENT |
 
 ---
 
@@ -435,13 +485,16 @@ po walidacji powyższych.
 | 5.1 collate vectorization | ✅ | `2218f9c` |
 | 5.2 anti-repetition tuning | ✅ | `66394fa` |
 | 5.3 larger effective batch (1024) | ✅ | `09c5028` |
-| 5.4 persistent per-worker PV cache | ⬜ po walidacji 5.1–5.3 | — |
+| 5.4 persistent per-worker PV cache | ⏭️ pominięty (selfplay=1s, brak bottlenecku) | — |
 | 5.5 smooth temperature annealing | ✅ | `6a3f115` |
-| 5.6 adaptive SF teacher depth | ⬜ po walidacji 5.1–5.3 | — |
+| 5.6 adaptive SF teacher depth | ⏭️ pominięty (selfplay=1s, brak bottlenecku) | — |
 | 5.7 moves-left search integration | ⬜ eksperyment | — |
-| 5.8 dynamic games_per_iter | ⬜ po walidacji 5.1–5.3 | — |
+| 5.8 dynamic games_per_iter | ⏭️ pominięty (selfplay=1s, brak bottlenecku) | — |
+| 5.9 gradient accumulation (2×1024) | ✅ | `c6ed33e` |
+| 5.10 decisive mining + SF teacher boost | ✅ | `f614d56` |
+| 5.11 repetition z-penalty | ✅ | `0114064` |
 
-**Testy**: 133/133 zielone (+3 collate, +9 anti-repetition, +9 temperature).
+**Testy**: 147/147 zielone (+3 collate, +8 anti-rep+z-penalty, +9 temperature, +3 grad_accum, +3 decisive).
 
 ---
 
