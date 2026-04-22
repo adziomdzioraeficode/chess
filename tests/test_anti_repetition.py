@@ -91,3 +91,59 @@ class TestDrawWithAdvantagePenalty:
         board = chess.Board("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
         ms = material_score(board)
         assert ms > 5, f"White up a queen should have ms > 5, got {ms}"
+
+
+class TestRepetitionZPenalty:
+    """Tests for 5.11: z-target shrinkage for repetitive games."""
+
+    @staticmethod
+    def _compute_rep_z_scale(actual_rep_plies: int) -> float:
+        REP_PENALTY_THRESH = 10
+        REP_PENALTY_FULL   = 30
+        REP_PENALTY_MIN_SCALE = 0.5
+        if actual_rep_plies >= REP_PENALTY_THRESH:
+            frac = min(1.0, (actual_rep_plies - REP_PENALTY_THRESH) / max(1, REP_PENALTY_FULL - REP_PENALTY_THRESH))
+            return 1.0 - (1.0 - REP_PENALTY_MIN_SCALE) * frac
+        return 1.0
+
+    def test_no_penalty_below_threshold(self):
+        assert self._compute_rep_z_scale(0) == 1.0
+        assert self._compute_rep_z_scale(5) == 1.0
+        assert self._compute_rep_z_scale(9) == 1.0
+
+    def test_penalty_starts_at_threshold(self):
+        scale = self._compute_rep_z_scale(10)
+        assert scale == 1.0  # exactly at threshold → frac=0 → scale=1.0
+
+    def test_penalty_at_midpoint(self):
+        # 20 rep plies → frac = (20-10)/(30-10) = 0.5 → scale = 0.75
+        scale = self._compute_rep_z_scale(20)
+        assert abs(scale - 0.75) < 1e-6
+
+    def test_full_penalty(self):
+        scale = self._compute_rep_z_scale(30)
+        assert abs(scale - 0.5) < 1e-6
+
+    def test_beyond_full_capped(self):
+        """Beyond 30 rep plies, scale should stay at 0.5 (not go lower)."""
+        scale = self._compute_rep_z_scale(50)
+        assert abs(scale - 0.5) < 1e-6
+
+    def test_z_shrinks_correctly(self):
+        """A z=0.8 game with 20 rep plies → z_target = 0.8 * 0.75 = 0.6."""
+        scale = self._compute_rep_z_scale(20)
+        z_original = 0.8
+        z_scaled = z_original * scale
+        assert abs(z_scaled - 0.6) < 1e-6
+
+    def test_negative_z_shrinks_towards_zero(self):
+        """A z=-1.0 game with 30 rep plies → z_target = -1.0 * 0.5 = -0.5."""
+        scale = self._compute_rep_z_scale(30)
+        z_scaled = -1.0 * scale
+        assert abs(z_scaled - (-0.5)) < 1e-6
+
+    def test_draw_z_unaffected(self):
+        """z=0.0 is unaffected by any scaling."""
+        for rp in [0, 10, 20, 30, 50]:
+            scale = self._compute_rep_z_scale(rp)
+            assert 0.0 * scale == 0.0

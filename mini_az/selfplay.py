@@ -392,12 +392,26 @@ def make_game_samples_unified(
     else:
         z_white_end = z_boot_white if z_boot_white is not None else z_draw_white
 
+    # Repetition z-penalty (5.11): if game had excessive repetitions,
+    # shrink z towards 0 to penalise both sides for shuffling instead of
+    # making progress.  Scales linearly: >=10 rep plies → start penalising,
+    # >=30 rep plies → full penalty (z_target *= 0.5).
+    REP_PENALTY_THRESH = 10
+    REP_PENALTY_FULL   = 30
+    REP_PENALTY_MIN_SCALE = 0.5   # at full penalty, z is halved
+    if actual_rep_plies >= REP_PENALTY_THRESH:
+        frac = min(1.0, (actual_rep_plies - REP_PENALTY_THRESH) / max(1, REP_PENALTY_FULL - REP_PENALTY_THRESH))
+        rep_z_scale = 1.0 - (1.0 - REP_PENALTY_MIN_SCALE) * frac
+    else:
+        rep_z_scale = 1.0
+
     samples = []
     lam = float(np.clip(mcts_value_mix, 0.0, 1.0))
     final_tply = max(0, board.ply() - ply0)
     for bt, fs, ts, pr, pi, turn, v_mcts, sample_tply in trajectory:
         z_game = z_white_end if turn == chess.WHITE else -z_white_end
         z_target = (1.0 - lam) * float(z_game) + lam * float(v_mcts)
+        z_target *= rep_z_scale  # 5.11: penalise repetitive games
         z_target = float(np.clip(z_target, -1.0, 1.0))
         # Compute WDL target from z_target:
         # z in [-1, 1] → map to WDL probabilities
