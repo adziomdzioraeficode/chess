@@ -64,6 +64,36 @@ class TestReplayBuffer:
         batch = rb.sample_batch_mixed(16, recent_frac=0.75, recent_window=50, sharp_frac=0.25, sharp_threshold=0.25)
         assert len(batch) == 16
 
+    def test_sample_batch_mixed_with_decisive(self):
+        rb = ReplayBuffer(maxlen=1000)
+        # Add a mix: 50 decisive (z=0.8) and 50 non-decisive (z=0.1)
+        for _ in range(50):
+            rb.add_game([_make_sample(z=0.8)])
+        for _ in range(50):
+            rb.add_game([_make_sample(z=0.1)])
+        batch = rb.sample_batch_mixed(32, recent_frac=0.5, decisive_frac=0.25)
+        assert len(batch) == 32
+
+    def test_decisive_sampling_biased(self):
+        """Decisive sampling should return mostly |z|>0.3 samples."""
+        rb = ReplayBuffer(maxlen=1000)
+        for _ in range(200):
+            rb.add_game([_make_sample(z=0.8)])
+        for _ in range(800):
+            rb.add_game([_make_sample(z=0.1)])
+        # 20% decisive in buffer, but sampling should find mostly decisive
+        idxs = rb._sample_indices_decisive(100, threshold=0.3)
+        assert len(idxs) == 100
+        decisive_count = sum(1 for i in idxs if abs(rb.data[i].z) > 0.3)
+        assert decisive_count >= 80, f"Expected mostly decisive, got {decisive_count}/100"
+
+    def test_decisive_fallback_uniform(self):
+        """When no decisive samples exist, falls back to uniform."""
+        rb = ReplayBuffer(maxlen=100)
+        rb.add_game([_make_sample(z=0.0) for _ in range(50)])
+        idxs = rb._sample_indices_decisive(10, threshold=0.3)
+        assert len(idxs) == 10  # should not crash, falls back
+
     def test_sample_batch_mixed_empty(self):
         rb = ReplayBuffer(maxlen=100)
         batch = rb.sample_batch_mixed(8)

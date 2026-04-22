@@ -92,8 +92,9 @@ exec timeout 4h python -u -m mini_az --mode train \
     --sf_boot_depth 12 \
     --sf_cp_scale 600.0 \
     --sf_cp_cap 1000 \
-    --sf_teacher_prob 0.60 \
-    --sf_teacher_mix 0.35 \
+    --decisive_frac 0.15 \
+    --sf_teacher_prob 0.75 \
+    --sf_teacher_mix 0.50 \
     --sf_teacher_time_ms 0 \
     --sf_teacher_depth 8 \
     --sf_teacher_multipv 5 \

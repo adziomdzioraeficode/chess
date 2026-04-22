@@ -80,6 +80,30 @@ class ReplayBuffer:
     def _sample_indices_uniform(self, n: int) -> np.ndarray:
         return np.random.randint(0, len(self.data), size=n)
 
+    def _sample_indices_decisive(self, n: int, threshold: float = 0.3) -> np.ndarray:
+        """Sample indices biased towards decisive games (|z| > threshold).
+
+        Uses rejection sampling to avoid building a full weight array over 500k
+        samples. Falls back to uniform if fewer than n/2 decisive found.
+        """
+        if n <= 0 or len(self.data) == 0:
+            return np.array([], dtype=np.int64)
+        found: list[int] = []
+        tries_left = max(64, 16 * n)
+        size = len(self.data)
+        while len(found) < n and tries_left > 0:
+            idx = int(np.random.randint(0, size))
+            if abs(float(getattr(self.data[idx], "z", 0.0))) > threshold:
+                found.append(idx)
+            tries_left -= 1
+        if len(found) < n // 2:
+            # Too few decisive samples — fall back to uniform
+            return np.random.randint(0, size, size=n).astype(np.int64)
+        if len(found) < n:
+            extra = np.random.choice(np.asarray(found, dtype=np.int64), size=n - len(found), replace=True)
+            return np.concatenate([np.asarray(found, dtype=np.int64), extra])
+        return np.asarray(found, dtype=np.int64)
+
     def _sample_indices_recent(self, n: int, window: int) -> np.ndarray:
         size = len(self.data)
         if size == 0:
@@ -123,6 +147,7 @@ class ReplayBuffer:
         recent_window: int = 200_000,
         sharp_frac: float = 0.0,
         sharp_threshold: float = 0.35,
+        decisive_frac: float = 0.0,
     ) -> list[Sample]:
         size = len(self.data)
         if size == 0:
@@ -130,9 +155,11 @@ class ReplayBuffer:
 
         recent_frac = float(np.clip(recent_frac, 0.0, 1.0))
         sharp_frac = float(np.clip(sharp_frac, 0.0, 1.0))
+        decisive_frac = float(np.clip(decisive_frac, 0.0, 1.0))
 
         n_sharp = int(round(batch_size * sharp_frac))
-        n_remaining = batch_size - n_sharp
+        n_decisive = int(round(batch_size * decisive_frac))
+        n_remaining = batch_size - n_sharp - n_decisive
         n_recent = int(round(n_remaining * recent_frac))
         n_all = n_remaining - n_recent
 
@@ -143,6 +170,9 @@ class ReplayBuffer:
             n_missing = n_sharp - int(sharp_idxs.size)
             if n_missing > 0:
                 n_recent += n_missing
+        if n_decisive > 0:
+            dec_idxs = self._sample_indices_decisive(n_decisive)
+            idxs.append(dec_idxs)
         if n_recent > 0:
             idxs.append(self._sample_indices_recent(n_recent, recent_window))
         if n_all > 0:

@@ -137,6 +137,9 @@ def main():
     ap.add_argument("--recent_window", type=int, default=300_000)
     ap.add_argument("--sharp_frac", type=float, default=0.20)
     ap.add_argument("--sharp_threshold", type=float, default=0.35)
+    ap.add_argument("--decisive_frac", type=float, default=0.0,
+                    help="Fraction of batch from decisive samples (|z|>0.3). "
+                         "Helps policy learn to convert advantages.")
 
     ap.add_argument("--sf_boot_prob", type=float, default=1.0)
     ap.add_argument("--sf_boot_time_ms", type=int, default=20)

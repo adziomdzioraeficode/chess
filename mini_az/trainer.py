@@ -187,6 +187,7 @@ def trainer_loop(
                         recent_window=args.recent_window,
                         sharp_frac=args.sharp_frac,
                         sharp_threshold=args.sharp_threshold,
+                        decisive_frac=getattr(args, "decisive_frac", 0.0),
                     )
                     batch = collate(batch_s, device)
                     m = train_step(net, opt, batch, val_w=args.val_w,
