@@ -105,6 +105,8 @@ def main():
     ap.add_argument("--iters", type=int, default=10000)
     ap.add_argument("--batch", type=int, default=512)
     ap.add_argument("--steps_per_iter", type=int, default=300)
+    ap.add_argument("--grad_accum", type=int, default=1,
+                    help="Gradient accumulation steps. Effective batch = batch * grad_accum.")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--buffer", type=int, default=500_000)
 

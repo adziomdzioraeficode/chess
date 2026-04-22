@@ -170,20 +170,32 @@ def trainer_loop(
             t_tr0 = time.time()
             net.train()
             last_m = None
+            accum = max(1, int(getattr(args, "grad_accum", 1)))
+            loss_scale = 1.0 / accum
             for step in range(args.steps_per_iter):
                 _wait_if_paused()
                 if stop_ev.is_set():
                     return
                 if len(rb) < args.batch:
                     continue
-                batch_s = rb.sample_batch_mixed(
-                    args.batch, recent_frac=args.recent_frac,
-                    recent_window=args.recent_window,
-                    sharp_frac=args.sharp_frac,
-                    sharp_threshold=args.sharp_threshold,
-                )
-                batch = collate(batch_s, device)
-                m = train_step(net, opt, batch, val_w=args.val_w, moves_left_w=args.moves_left_w)
+                # Gradient accumulation: accumulate over `accum` mini-batches
+                # then do one optimizer step (effective batch = batch * accum).
+                opt.zero_grad()
+                for _sub in range(accum):
+                    batch_s = rb.sample_batch_mixed(
+                        args.batch, recent_frac=args.recent_frac,
+                        recent_window=args.recent_window,
+                        sharp_frac=args.sharp_frac,
+                        sharp_threshold=args.sharp_threshold,
+                    )
+                    batch = collate(batch_s, device)
+                    m = train_step(net, opt, batch, val_w=args.val_w,
+                                   moves_left_w=args.moves_left_w,
+                                   loss_scale=loss_scale, do_step=False)
+                grad_norm = float(torch.nn.utils.clip_grad_norm_(net.parameters(), 3.0))
+                opt.step()
+                if m is not None:
+                    m["grad_norm"] = grad_norm
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", message=".*epoch parameter.*deprecated.*")
                     scheduler.step()

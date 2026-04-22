@@ -272,3 +272,65 @@ class TestTrainStep:
         param_after = next(net.parameters()).data
 
         assert not torch.equal(param_before, param_after), "Weights should change after training step"
+
+    def test_grad_accum_no_step(self):
+        """With do_step=False, optimizer should NOT step (weights unchanged)."""
+        net = ChessNet()
+        net.train()
+        opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+        samples = [_make_sample(n_moves=5) for _ in range(4)]
+        batch = collate(samples, "cpu")
+
+        opt.zero_grad()
+        param_before = next(net.parameters()).data.clone()
+        m = train_step(net, opt, batch, val_w=1.0, loss_scale=0.5, do_step=False)
+        param_after = next(net.parameters()).data
+
+        assert torch.equal(param_before, param_after), "Weights must NOT change with do_step=False"
+        # But gradients should exist
+        assert next(net.parameters()).grad is not None
+        assert m["loss"] > 0
+
+    def test_grad_accum_two_steps_then_update(self):
+        """Accumulate 2 sub-batches then manually step — weights should change."""
+        net = ChessNet()
+        net.train()
+        opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+        samples = [_make_sample(n_moves=5) for _ in range(8)]
+
+        param_before = next(net.parameters()).data.clone()
+
+        opt.zero_grad()
+        batch1 = collate(samples[:4], "cpu")
+        train_step(net, opt, batch1, val_w=1.0, loss_scale=0.5, do_step=False)
+
+        batch2 = collate(samples[4:], "cpu")
+        train_step(net, opt, batch2, val_w=1.0, loss_scale=0.5, do_step=False)
+
+        # Manual clip + step (like trainer_loop does)
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 3.0)
+        opt.step()
+
+        param_after = next(net.parameters()).data
+        assert not torch.equal(param_before, param_after), "Weights should change after accumulated step"
+
+    def test_grad_accum_loss_scaling(self):
+        """Loss scale=0.5 should produce roughly half the gradient magnitude."""
+        net = ChessNet()
+        net.train()
+        opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+        samples = [_make_sample(n_moves=5) for _ in range(4)]
+        batch = collate(samples, "cpu")
+
+        # Full scale
+        opt.zero_grad()
+        train_step(net, opt, batch, val_w=1.0, loss_scale=1.0, do_step=False)
+        grad_full = next(net.parameters()).grad.clone()
+
+        # Half scale
+        opt.zero_grad()
+        train_step(net, opt, batch, val_w=1.0, loss_scale=0.5, do_step=False)
+        grad_half = next(net.parameters()).grad.clone()
+
+        ratio = grad_half.norm() / (grad_full.norm() + 1e-12)
+        assert 0.45 < ratio.item() < 0.55, f"Expected ~0.5 ratio, got {ratio.item():.3f}"

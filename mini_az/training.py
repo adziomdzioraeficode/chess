@@ -257,7 +257,16 @@ def masked_entropy(p: torch.Tensor, mask: torch.Tensor, eps: float = 1e-12) -> t
     return ent.mean()
 
 
-def train_step(net, opt, batch, val_w=2.0, moves_left_w: float = 0.15):
+def train_step(net, opt, batch, val_w=2.0, moves_left_w: float = 0.15,
+               loss_scale: float = 1.0, do_step: bool = True):
+    """Single forward+backward pass.
+
+    Args:
+        loss_scale: multiply loss before backward (for gradient accumulation,
+                    pass 1/accum_steps so gradients average correctly).
+        do_step:    if False, skip opt.zero_grad before and opt.step after
+                    (caller manages these for accumulation).
+    """
     boards, fs, ts, pr, mask, target_pi, z, wdl_target, plies_left_target = batch
     logits, wdl_logits, moves_left_pred = net.forward_policy_value(boards, fs, ts, pr, mask)
 
@@ -271,10 +280,14 @@ def train_step(net, opt, batch, val_w=2.0, moves_left_w: float = 0.15):
 
     loss = pol_loss + val_w * val_loss + float(moves_left_w) * ml_loss
 
-    opt.zero_grad()
-    loss.backward()
-    grad_norm = float(torch.nn.utils.clip_grad_norm_(net.parameters(), 3.0))
-    opt.step()
+    if do_step:
+        opt.zero_grad()
+    (loss * loss_scale).backward()
+
+    grad_norm = 0.0
+    if do_step:
+        grad_norm = float(torch.nn.utils.clip_grad_norm_(net.parameters(), 3.0))
+        opt.step()
 
     with torch.no_grad():
         pred_pi = torch.softmax(logits, dim=-1)
