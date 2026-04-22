@@ -77,41 +77,42 @@ else
 fi
 echo ""
 
-# ── 4. Check training artifacts ──
-echo "=== 4/4: Checking training artifacts ==="
+# ── 4. Pull LFS files ──
+echo "=== 4/5: Pulling Git LFS files ==="
+git lfs pull
+echo "  ✓ LFS pull complete"
 echo ""
 
-# Model weights (TRACKED — should be there)
-if [ -f mini_az.pt ]; then
-    echo "  ✓ mini_az.pt ($(du -h mini_az.pt | cut -f1)) — model weights"
-else
-    echo "  ✗ mini_az.pt MISSING — training will start from scratch!"
-fi
+# ── 5. Check training artifacts ──
+echo "=== 5/5: Checking training artifacts ==="
+echo ""
 
-if [ -f models/best.pt ]; then
-    echo "  ✓ models/best.pt ($(du -h models/best.pt | cut -f1)) — best gated model"
-else
-    echo "  ⚠ models/best.pt missing — will be created during training"
-fi
+ARTIFACTS=(
+    "mini_az.pt:model weights"
+    "mini_az_ckpt.pt:optimizer checkpoint"
+    "models/best.pt:best gated model"
+    "replay.pkl.gz:replay buffer"
+)
 
-# Checkpoint (GITIGNORED — won't be there)
-if [ -f mini_az_ckpt.pt ]; then
-    echo "  ✓ mini_az_ckpt.pt ($(du -h mini_az_ckpt.pt | cut -f1)) — optimizer checkpoint"
-else
-    echo "  ⚠ mini_az_ckpt.pt MISSING (gitignored)"
-    echo "    → Training will work but optimizer state (Adam moments) resets."
-    echo "    → To preserve optimizer: scp from old VM or remove --resume_opt"
-    echo "    → Without it: first ~50 iters may have slightly noisier gradients."
-    echo "    → This is NOT critical — AdamW will re-adapt in ~20-50 iters."
-fi
+all_ok=true
+for entry in "${ARTIFACTS[@]}"; do
+    path="${entry%%:*}"
+    desc="${entry#*:}"
+    if [ -f "$path" ]; then
+        echo "  ✓ $path ($(du -h "$path" | cut -f1)) — $desc"
+    else
+        echo "  ✗ $path MISSING — $desc"
+        all_ok=false
+    fi
+done
 
-# Replay buffer (GITIGNORED — won't be there)
-if [ -f replay.pkl.gz ]; then
-    echo "  ✓ replay.pkl.gz ($(du -h replay.pkl.gz | cut -f1)) — replay buffer"
+if [ "$all_ok" = true ]; then
+    echo ""
+    echo "  All artifacts present — full resume possible."
 else
-    echo "  ⚠ replay.pkl.gz MISSING (gitignored)"
-    echo "    → Training starts with empty buffer — first 2-3 iters will be slow"
-    echo "    → This is fine: buffer fills from selfplay and doesn't need old data."
+    echo ""
+    echo "  Some artifacts missing. Training will still work but may"
+    echo "  reset optimizer state or start with empty replay buffer."
 fi
 
 echo ""
@@ -121,9 +122,6 @@ echo "============================================"
 echo ""
 echo "To start training:"
 echo "  bash tmux_run_learning.sh"
-echo ""
-echo "To copy optimizer state from old VM (optional):"
-echo "  scp old-vm:~/repo/chess/mini_az_ckpt.pt ."
 echo ""
 echo "To monitor:"
 echo "  tmux attach -t learning"
